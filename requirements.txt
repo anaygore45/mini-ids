@@ -1,0 +1,17 @@
+# Mini-IDS Dependencies
+# Compatible with Python 3.10+ (Tested on Python 3.13)
+
+# Packet capture, PCAP parsing, and protocol dissection
+scapy>=2.5.0
+
+# Security monitoring dashboard web interface
+streamlit>=1.30.0
+
+# Interactive cybersecurity analytics visualizations
+altair>=5.0.0
+
+# Data manipulation and aggregation for traffic metrics and alerts
+pandas>=2.0.0
+
+# Automated unit and integration testing framework
+pytest>=8.0.0
