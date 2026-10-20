@@ -27,9 +27,11 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+from capture.live_capture import get_available_interfaces, get_live_worker
 from storage.database import DEFAULT_DB_PATH, DatabaseManager
 
 logger = logging.getLogger("mini_ids.dashboard")
+
 
 
 def format_timestamp(ts: Union[float, int, str, None]) -> str:
@@ -158,8 +160,148 @@ def build_ranking_chart(
     return chart
 
 
+def render_live_capture_section(target_db_path: Path) -> None:
+    """Render the Live Packet Capture control panel and real-time status."""
+    st.markdown("### 📡 Live Packet Capture (Passive Sniffer)")
+    st.caption(
+        "Capture live traffic from local network adapters using Npcap. Packets are evaluated "
+        "against detection rules and saved directly to the active SQLite database."
+    )
+
+    worker = get_live_worker()
+    status = worker.get_status()
+
+    # Capture status banner
+    if status["status"] == "STOPPING":
+        st.warning(
+            f"⏳ **Stopping capture on `{status['interface']}`... finalizing queue and database writes.**\n\n"
+            f"**Packets Captured:** {status['packets_captured']:,} | "
+            f"**Persisted to DB:** {status['packets_persisted']:,} | "
+            f"**Queue Drops:** {status['packets_dropped']:,} | "
+            f"**Alerts Triggered:** {status['alerts_generated']:,}"
+        )
+    elif status["is_running"]:
+        st.info(
+            f"🟢 **Live Capture Active on `{status['interface']}`**\n\n"
+            f"**Packets Captured:** {status['packets_captured']:,} | "
+            f"**Persisted to DB:** {status['packets_persisted']:,} | "
+            f"**Queue Drops:** {status['packets_dropped']:,} | "
+            f"**Alerts Triggered:** {status['alerts_generated']:,} | "
+            f"**Elapsed Time:** {status['elapsed_seconds']:.1f}s"
+        )
+    elif status["status"] == "COMPLETED":
+        st.success(
+            f"✅ **Capture Completed on `{status['interface']}`**\n\n"
+            f"Captured: **{status['packets_captured']:,}** packets | "
+            f"Persisted: **{status['packets_persisted']:,}** | "
+            f"Queue Drops: **{status['packets_dropped']:,}** | "
+            f"Alerts Triggered: **{status['alerts_generated']:,}** | "
+            f"Duration: **{status['elapsed_seconds']:.1f}s**"
+        )
+    elif status["status"] == "STOPPED":
+        st.warning(
+            f"⏹️ **Capture Stopped on `{status['interface']}`**\n\n"
+            f"Captured: **{status['packets_captured']:,}** packets | "
+            f"Persisted: **{status['packets_persisted']:,}** | "
+            f"Queue Drops: **{status['packets_dropped']:,}** | "
+            f"Alerts Triggered: **{status['alerts_generated']:,}** | "
+            f"Duration: **{status['elapsed_seconds']:.1f}s**"
+        )
+    elif status["status"] == "ERROR":
+        st.error(f"❌ **Capture Error:** {status.get('error_message')}")
+    elif status["status"] == "IDLE":
+        st.caption("ℹ️ **Sniffer Status:** `IDLE` — Ready to capture. Select an interface in the configuration panel below and click **Start Capture**.")
+
+    with st.expander("⚙️ Capture Configuration & Controls", expanded=status["is_running"] or status["status"] == "IDLE"):
+        available_ifaces = get_available_interfaces()
+
+        if not available_ifaces:
+            st.warning(
+                "⚠️ **No network interfaces discovered.**\n\n"
+                "Ensure Npcap is installed on Windows with 'WinPcap API-compatible Mode' enabled. "
+                "Administrative privileges may be required to access raw network adapters."
+            )
+            return
+
+        # Interface selection
+        iface_labels = [i["display_name"] for i in available_ifaces]
+        selected_label = st.radio(
+            "Select Network Interface",
+            options=iface_labels,
+            index=0,
+            help="Choose the network adapter to monitor. Passive sniffing only; traffic is not injected or altered.",
+            key="live_capture_iface_select",
+        )
+        selected_iface = next((i for i in available_ifaces if i["display_name"] == selected_label), available_ifaces[0])
+
+        col_cond, col_val = st.columns(2)
+        with col_cond:
+            stop_condition = st.radio(
+                "Stop Condition",
+                options=["Manual Stop", "Duration Timeout", "Packet Count Limit"],
+                index=0,
+                horizontal=True,
+                key="live_capture_condition_type",
+            )
+        with col_val:
+            duration_limit: Optional[float] = None
+            packet_limit: Optional[int] = None
+            if stop_condition == "Duration Timeout":
+                duration_limit = float(
+                    st.number_input(
+                        "Timeout (Seconds)",
+                        min_value=1.0,
+                        max_value=3600.0,
+                        value=15.0,
+                        step=5.0,
+                        key="live_capture_duration_val",
+                    )
+                )
+            elif stop_condition == "Packet Count Limit":
+                packet_limit = int(
+                    st.number_input(
+                        "Max Packets",
+                        min_value=5,
+                        max_value=100000,
+                        value=100,
+                        step=25,
+                        key="live_capture_packet_val",
+                    )
+                )
+
+        btn_start, btn_stop, btn_refresh = st.columns([1, 1, 2])
+        with btn_start:
+            can_start = not status["is_running"]
+            if st.button("▶️ Start Capture", disabled=not can_start, type="primary", key="live_btn_start"):
+                iface_id = selected_iface["name"] if selected_iface["name"] else selected_iface["guid"]
+                try:
+                    worker.configure(
+                        interface=iface_id,
+                        db_path=target_db_path,
+                        packet_limit=packet_limit,
+                        duration_seconds=duration_limit,
+                    )
+                    worker.start()
+                    st.rerun()
+                except Exception as ex:
+                    st.error(f"Failed to start capture: {ex}")
+
+        with btn_stop:
+            can_stop = status["is_running"]
+            if st.button("⏹️ Stop Capture", disabled=not can_stop, key="live_btn_stop"):
+                worker.stop()
+                st.rerun()
+
+        with btn_refresh:
+            if st.button("🔄 Refresh Live Telemetry", key="live_btn_refresh"):
+                st.rerun()
+
+    st.divider()
+
+
 def render_dashboard() -> None:
     """Render the main Streamlit dashboard UI."""
+
     st.set_page_config(
         page_title="Mini-IDS Security Dashboard",
         page_icon="🛡️",
@@ -213,7 +355,7 @@ def render_dashboard() -> None:
     )
 
     st.title("🛡️ Mini-IDS Security Dashboard")
-    st.caption("Network Intrusion Detection System — Stored Analysis Viewer")
+    st.caption("Network Intrusion Detection System — Real-Time Packet Sniffing & Forensic Security Analytics")
 
     # Sidebar: Database Configuration & Refresh
     st.sidebar.header("Database Configuration")
@@ -242,6 +384,9 @@ def render_dashboard() -> None:
             "Or enter a valid database path in the sidebar."
         )
         return
+
+    # Live Packet Capture Section
+    render_live_capture_section(target_db_path)
 
     # Database Retrieval and UI Rendering with reliable connection cleanup
     try:
@@ -366,15 +511,32 @@ def render_dashboard() -> None:
             else:
                 st.subheader("Stored Totals (Cumulative Across All Analyses)")
                 st.caption(
-                    "Cumulative metrics reflect the complete database state across all ingested PCAP runs. "
-                    "Investigation workflows below inspect individual alerts and their local evidence."
+                    "Cumulative metrics reflect the complete database state across all ingested PCAP runs and live captures. "
+                    "Historical PCAP data (October 2015) and recent captures (October 2026) are preserved. "
+                    "Use 'Filter by Time Range' in the sidebar to isolate specific observation periods."
                 )
 
             metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
-            metric_col1.metric("Total Stored Packets", f"{kpis['total_packets']:,}")
-            metric_col2.metric("Total Stored Alerts", f"{kpis['total_alerts']:,}")
-            metric_col3.metric("High-Severity Alerts", f"{kpis['high_severity_alerts']:,}")
-            metric_col4.metric("Distinct Alert Sources", f"{kpis['distinct_alert_sources']:,}")
+            metric_col1.metric(
+                "Total Stored Packets",
+                f"{kpis['total_packets']:,}",
+                help="Cumulative network frames decoded and indexed in the active SQLite database across all capture runs.",
+            )
+            metric_col2.metric(
+                "Total Stored Alerts",
+                f"{kpis['total_alerts']:,}",
+                help="Cumulative intrusion alerts generated by detection heuristics across all runs.",
+            )
+            metric_col3.metric(
+                "High-Severity Alerts",
+                f"{kpis['high_severity_alerts']:,}",
+                help="Alerts classified as HIGH or CRITICAL severity (e.g. rapid port scans or high-volume floods).",
+            )
+            metric_col4.metric(
+                "Distinct Alert Sources",
+                f"{kpis['distinct_alert_sources']:,}",
+                help="Count of unique source IP addresses that triggered at least one detection alert in the database.",
+            )
 
             # Grouped rule counts (preserves previous metric cards for compatibility)
             rule_counts = Counter(a["rule_name"] for a in all_alerts if a.get("rule_name"))

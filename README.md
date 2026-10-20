@@ -3,8 +3,8 @@
 A lightweight, modular, educational Network Intrusion Detection System (NIDS) built with Python, Scapy, SQLite, and Streamlit on Windows.
 
 > [!NOTE]
-> **Project Status: Milestone 4 Completed (Security Analytics & Alert Investigation)**
-> The project provides a complete, functional offline intrusion detection pipeline, persistent SQLite database storage, automated unit/integration tests (77 passed), and an interactive Streamlit Security Analytics Dashboard with alert investigation and correlated packet telemetry.
+> **Project Status: Live Packet Capture & Security Analytics Completed**
+> The project provides dual ingestion pipelines (offline PCAP analysis and Npcap live packet capture), persistent SQLite database storage, heuristic detection rules (Port Scan, SYN Rate, Traffic Anomaly), an automated test suite (97 passed), and an interactive Streamlit Security Analytics Dashboard with alert investigation and live capture controls.
 
 ---
 
@@ -55,7 +55,8 @@ Mini-IDS operates as a **passive detection system**: it logs events and notifies
 mini-ids/
 ├── capture/                    # Packet ingestion and normalization
 │   ├── __init__.py
-│   └── packet_capture.py       # Scapy PCAP reader and live sniffer
+│   ├── packet_capture.py       # Scapy PCAP reader and packet normalizer
+│   └── live_capture.py         # Npcap background sniffer worker and interface resolver
 ├── detection/                  # Heuristic detection algorithms
 │   ├── __init__.py
 │   ├── port_scan.py            # TCP port scan detector
@@ -64,14 +65,15 @@ mini-ids/
 ├── storage/                    # Persistent alert & packet database
 │   ├── __init__.py
 │   └── database.py             # SQLite schema, queries, and aggregations
-├── tests/                      # Comprehensive test suite (77 tests)
+├── tests/                      # Comprehensive test suite (97 tests)
 │   ├── __init__.py
 │   ├── test_capture.py         # Capture and packet normalization tests
 │   ├── test_detection.py       # Core detector logic and alert tests
 │   ├── test_boundary_detection.py # Edge cases and boundary condition tests
 │   ├── test_storage.py         # SQLite CRUD, indexing, and aggregation tests
 │   ├── test_end_to_end.py      # Full pipeline CLI ingestion tests
-│   └── test_dashboard.py       # Headless Streamlit integration and chart tests
+│   ├── test_dashboard.py       # Headless Streamlit integration and chart tests
+│   └── test_live_capture.py    # Live capture worker, interface enumeration, and UI tests
 ├── data/                       # Local data folder (.gitignore excludes *.db and *.pcap)
 │   └── .gitkeep
 ├── docs/                       # Technical documentation
@@ -124,7 +126,7 @@ pip install -r requirements.txt
 ```
 
 ### Step 4: Run the Automated Test Suite
-Verify that all 77 unit, integration, and dashboard tests pass:
+Verify that all 97 unit, integration, and dashboard tests pass:
 ```powershell
 pytest -v
 ```
@@ -148,9 +150,27 @@ python main.py --pcap "data/your_capture.pcap" --db "data/custom_alerts.db"
 > [!TIP]
 > Replace `data/your_capture.pcap` with the path to your own packet capture file. Running `main.py` multiple times against the same database appends new records without deleting prior data.
 
+### Live Packet Capture via CLI
+
+Capture live network traffic directly from local network interfaces using `main.py`:
+
+```powershell
+# 1. List all network interfaces discovered by Scapy:
+python main.py --list-interfaces
+
+# 2. Run live capture with a packet limit (e.g., 100 packets):
+python main.py --interface "Wi-Fi" --count 100
+
+# 3. Run live capture with a duration timeout (e.g., 30 seconds):
+python main.py --interface "Loopback Pseudo-Interface 1" --timeout 30.0
+
+# 4. Continuous live capture (press Ctrl+C to terminate cleanly):
+python main.py --interface "Wi-Fi" --db "data/live_alerts.db"
+```
+
 ### Launching the Streamlit Security Dashboard
 
-Start the interactive web dashboard to explore security KPIs, analyze traffic patterns, and investigate alerts:
+Start the interactive web dashboard to explore security KPIs, analyze traffic patterns, investigate alerts, and control live capture:
 
 ```powershell
 streamlit run app.py
@@ -159,6 +179,11 @@ streamlit run app.py
 Open your browser to `http://localhost:8501`.
 
 #### Dashboard Capabilities:
+- **📡 Live Packet Capture Panel:**
+  - Select any discovered network adapter (e.g., Wi-Fi, Ethernet, Loopback).
+  - Configure stop conditions (Manual stop, Duration timeout, or Packet count limit).
+  - Start, stop, and refresh capture with real-time status banners, packet counts, and alert counts.
+  - Automatically commits packets and triggered alerts into the active SQLite database.
 - **Custom Database Path:** Connects to `data/mini_ids.db` by default. You can point to any local SQLite database using the sidebar input.
 - **Filter Scoping:**
   - **Alert Filters (Rule, Severity, Time Range):** Scope the Security KPIs, Alert Breakdown by Rule, Alert Severity Distribution, Alert Timeline, and Recent Security Alerts.
@@ -170,25 +195,35 @@ Open your browser to `http://localhost:8501`.
 
 ## 8. Automated Testing & Verification
 
-The test suite covers unit logic, edge cases, database persistence, and dashboard rendering:
+The test suite covers unit logic, edge cases, database persistence, live capture workers, and dashboard rendering:
 
 ```powershell
 pytest -v
 ```
 
-**Test Coverage Summary (77 tests passed):**
-- `test_capture.py`: Packet parsing, IP/TCP/UDP extraction, malformed packet handling.
-- `test_detection.py`: Port scan, SYN rate, and traffic volume anomaly detection rules.
-- `test_boundary_detection.py`: Window boundary timing, threshold edge cases, packet suppression.
-- `test_storage.py`: SQLite schema creation, insertion batching, time-range queries, protocol filtering, and sparse timeline aggregation.
-- `test_end_to_end.py`: CLI ingestion pipeline execution and database verification.
-- `test_dashboard.py`: Headless Streamlit runner tests, data framing, and Altair chart construction for single, sparse, and empty timelines.
+**Test Coverage Summary (97 tests passed):**
+- `test_capture.py`: Packet parsing, IP/TCP/UDP extraction, malformed packet handling (10 tests).
+- `test_detection.py`: Port scan, SYN rate, and traffic volume anomaly detection rules (16 tests).
+- `test_boundary_detection.py`: Window boundary timing, threshold edge cases, packet suppression (13 tests).
+- `test_storage.py`: SQLite schema creation, insertion batching, time-range queries, protocol filtering, and sparse timeline aggregation (21 tests).
+- `test_end_to_end.py`: CLI ingestion pipeline execution and database verification (5 tests).
+- `test_dashboard.py`: Headless Streamlit runner tests, data framing, and Altair chart construction (12 tests).
+- `test_live_capture.py`: Interface enumeration, worker lifecycle, duplicate-start prevention, packet limits, timeout triggers, synthetic integration, and UI controls (20 tests).
 
 ---
 
-## 9. Security & Ethical Monitoring Statement
+## 9. Known Limitations & Troubleshooting
+
+- **Npcap Installation:** On Windows, live capture requires [Npcap](https://npcap.com/) installed with *"WinPcap API-compatible Mode"* enabled. If Npcap is missing, `main.py --list-interfaces` will indicate no interfaces found.
+- **Administrator Privileges:** Capturing promiscuous traffic on physical Wi-Fi or Ethernet adapters often requires running PowerShell / Terminal as Administrator. If access is denied, run the terminal as Administrator or use the Loopback interface (`127.0.0.1`) for local testing.
+- **Passive Sniffing:** Mini-IDS is strictly passive. It does not inject packets, reset TCP sessions, or block traffic.
+- **Heuristic Detectors:** Detection rules evaluate sliding-window statistics against threshold heuristics. They provide decision-support telemetry rather than definitive proof of host compromise.
+- **Offline PCAP Support:** Offline PCAP ingestion remains fully functional and does not require Npcap or administrator privileges.
+
+---
+
+## 10. Security & Ethical Monitoring Statement
 
 > [!CAUTION]
 > **Ethical Monitoring Notice:**
 > Live network packet inspection captures sensitive payload headers and metadata. Passive monitoring must strictly be confined to networks, interfaces, and systems that you own or have explicit authorization to inspect. Offline PCAP analysis should only be performed on authorized capture files. Detectors rely on statistical and signature heuristics and should be used as decision-support telemetry rather than autonomous enforcement.
-

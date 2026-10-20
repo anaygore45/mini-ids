@@ -75,17 +75,21 @@ Regardless of whether the input originates from an offline PCAP file or a live n
 ## 3. Module Responsibilities
 
 ### 3.1 Packet Capture & Normalization (`capture/`)
-- **Offline PCAP Reader:** Uses Scapy's `PcapReader` or `rdpcap` to read packet sequences iteratively from standard `.pcap` / `.pcapng` files without exhausting memory on large captures.
-- **Live Interface Sniffer:** Interfaces with Windows packet drivers (Npcap) using Scapy's `sniff()` function with optional BPF (Berkeley Packet Filters) to isolate IP/TCP traffic.
-- **Normalizer:** Decouples downstream detection from raw Scapy packet structures by extracting a normalized data dictionary/dataclass:
+- **Offline PCAP Reader (`capture/packet_capture.py`):** Uses Scapy's `PcapReader` to stream packets iteratively from `.pcap` / `.pcapng` files without loading entire captures into memory.
+- **Live Interface Capture (`capture/live_capture.py`):**
+  - Interfaces with Windows packet drivers (Npcap) using Scapy's `AsyncSniffer`.
+  - Safe enumeration of adapters via `get_available_interfaces()`.
+  - Uses an internal bounded `queue.Queue` to decouple raw packet capture from detector execution and SQLite disk I/O, preventing packet drops.
+  - Manages background thread execution via `LiveCaptureWorker` with atomic status telemetry and stop triggers (duration timeout, packet count limit, manual stop).
+- **Packet Normalizer:** Decouples downstream detection from raw Scapy packet structures by extracting a normalized dataclass (`NormalizedPacket`):
   - `timestamp`: Float (epoch seconds)
   - `src_ip`: String
   - `dst_ip`: String
-  - `protocol`: String (TCP, UDP, ICMP)
+  - `protocol`: String (TCP, UDP, ICMP, OTHER)
   - `src_port`: Integer (optional)
   - `dst_port`: Integer (optional)
   - `tcp_flags`: String (e.g., 'S', 'SA', 'FA', 'R')
-  - `packet_length`: Integer (bytes)
+  - `length`: Integer (bytes)
 
 By normalizing traffic at ingestion, **offline replay and live capture share identical detection logic**.
 
@@ -110,23 +114,57 @@ The detection engine comprises three specialized detection modules operating ove
   - `packets` table: `id`, `timestamp` (epoch float), `src_ip`, `dst_ip`, `protocol`, `length`, `src_port`, `dst_port`, `tcp_flags`.
   - `alerts` table: `id`, `timestamp` (epoch float), `rule_name`, `src_ip`, `dst_ip`, `observed_value`, `threshold`, `window_seconds`, `severity`, `message`.
   - Indexes: B-tree indexes on `timestamp`, `src_ip`, `dst_ip`, and `rule_name` for sub-second analytical querying.
-- **Analysis Run Scoping:** The schema preserves raw cumulative records across offline PCAP runs. Analysis isolation is performed via parameterized timestamp interval queries (`[start_time, end_time]`).
+- **Analysis Run Scoping:** The schema preserves raw cumulative records across offline PCAP and live sessions. Analysis isolation is performed via parameterized timestamp interval queries (`[start_time, end_time]`).
 
 ### 3.4 User Interface & Dashboard (`app.py`)
 - **Dashboard Framework:** Streamlit + Altair for declarative interactive visualizations.
 - **Features:**
-  - Executive summary KPIs (cumulative stored packets, total alerts, high-severity events, distinct alert sources).
-  - Security analytics: Alert severity distribution, detection rule breakdown, discrete time-bucket alert timeline, top offending sources, and top targeted destination hosts.
-  - Traffic analytics: Protocol distribution, top destination ports, network volume timeline, and top traffic destinations.
-  - Alert investigation workflow: Drill-down by alert ID with correlated packet evidence within sliding evaluation windows.
-  - Scoped time-range filtering and protocol/rule filters.
+  - **Live Packet Capture Controls:** Interface selection, stop condition controls (duration/count/manual), real-time status banners, and refreshable telemetry.
+  - **Executive summary KPIs:** Cumulative stored packets, total alerts, high-severity events, distinct alert sources.
+  - **Security analytics:** Alert severity distribution, detection rule breakdown, discrete column bar alert timeline, top offending sources, and top targeted destination hosts.
+  - **Traffic analytics:** Protocol distribution, top destination ports, network volume timeline, and top traffic destinations.
+  - **Alert investigation workflow:** Drill-down by alert ID with correlated packet evidence within sliding evaluation windows.
+  - **Scoped time-range filtering** and protocol/rule filters.
 
 ### 3.5 Core Coordinator (`main.py`)
-- CLI entrypoint that stitches together the capture source, feeds packets to the detectors, passes detected alerts to the storage manager, and outputs structured console summaries.
+- CLI entrypoint supporting both offline PCAP ingestion (`--pcap`) and live capture (`--interface`, `--count`, `--timeout`, `--list-interfaces`).
 
 ---
 
-## 4. Current Status vs. Milestone Plan
+## 4. Live Capture Concurrency & Safety Model
+
+```
++---------------------------------------------------------------------------------+
+|                                Streamlit Main Thread                            |
+|  - Renders UI controls (Start / Stop / Refresh)                                 |
+|  - Queries worker snapshot via worker.get_status()                              |
+|  - Reads database records via read-only DatabaseManager                         |
++----------------------------------------+----------------------------------------+
+                                         | (Configures & Starts Worker)
+                                         v
++---------------------------------------------------------------------------------+
+|                       LiveCaptureWorker Thread (Daemon)                         |
+|  - Opens dedicated, thread-confined DatabaseManager instance                    |
+|  - Spawns Scapy AsyncSniffer on specified adapter                               |
+|  - Pulls normalized packets from thread-safe queue.Queue                        |
+|  - Evaluates PortScanDetector, SynRateDetector, TrafficAnomalyDetector          |
+|  - Batches packet and alert writes to SQLite (WAL mode)                         |
+|  - Monitors duration timeouts, packet limits, and manual stop events            |
+|  - Closes database connection cleanly upon completion                           |
++----------------------------------------+----------------------------------------+
+                                         |
+                       +-----------------+-----------------+
+                       |                                   |
+                       v                                   v
+             [AsyncSniffer Sniff Thread]         [SQLite Database (WAL)]
+             - Captures raw L2/L3 frames         - Independent connections
+             - Normalizes packet metadata        - Atomic batch transactions
+             - Pushes to queue (non-blocking)    - Preserves historical records
+```
+
+---
+
+## 5. Current Status vs. Milestone Plan
 
 | Component | Status | Target Milestone |
 |---|---|---|
@@ -135,4 +173,5 @@ The detection engine comprises three specialized detection modules operating ove
 | Detection Rules (Port scan, SYN, Volume) | **Completed** | Milestone 2 |
 | SQLite Alert & Packet Storage | **Completed** | Milestone 3 |
 | Streamlit Dashboard & CLI Runner | **Completed** | Milestone 4 |
+| Live Packet Capture & Npcap Sniffing | **Completed** | Live Capture Milestone |
 

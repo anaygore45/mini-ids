@@ -129,18 +129,49 @@ def process_pcap_stream(
     }
 
 
+from capture.live_capture import LiveCaptureWorker, get_available_interfaces
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build and return command-line argument parser."""
     parser = argparse.ArgumentParser(
         prog="mini-ids",
-        description="Mini-IDS: Offline PCAP Network Intrusion Detection Pipeline",
+        description="Mini-IDS: Network Intrusion Detection System (Offline PCAP & Live Capture)",
     )
     parser.add_argument(
         "-p",
         "--pcap",
-        required=True,
+        required=False,
+        default=None,
         type=str,
         help="Path to the offline PCAP or PCAPNG capture file to analyze.",
+    )
+    parser.add_argument(
+        "-i",
+        "--interface",
+        required=False,
+        default=None,
+        type=str,
+        help="Name or device identifier of network interface for live capture.",
+    )
+    parser.add_argument(
+        "--list-interfaces",
+        action="store_true",
+        help="List all network interfaces discovered by Scapy and exit.",
+    )
+    parser.add_argument(
+        "-c",
+        "--count",
+        type=int,
+        default=None,
+        help="Maximum packet limit for live capture.",
+    )
+    parser.add_argument(
+        "-t",
+        "--timeout",
+        type=float,
+        default=None,
+        help="Capture duration timeout in seconds for live capture.",
     )
     parser.add_argument(
         "-d",
@@ -157,9 +188,109 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    pcap_file = Path(args.pcap)
+    # 1. Handle interface listing
+    if args.list_interfaces:
+        ifaces = get_available_interfaces()
+        print("=" * 60)
+        print("Mini-IDS: Available Network Interfaces")
+        print("=" * 60)
+        if not ifaces:
+            print("No network interfaces discovered (Npcap may not be installed).")
+        else:
+            for iface in ifaces:
+                print(f"  * {iface['display_name']}")
+        print("=" * 60)
+        return 0
+
+    # 2. Validate input modes
+    if args.pcap and args.interface:
+        parser.print_help()
+        print(
+            "\n[ERROR] --pcap and --interface are mutually exclusive. Specify only one ingestion source.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not args.pcap and not args.interface:
+        parser.print_help()
+        print(
+            "\n[ERROR] Either --pcap <file> or --interface <name> must be specified (or use --list-interfaces).",
+            file=sys.stderr,
+        )
+        return 1
+
+    # 3. Validate capture limits and timeouts
+    if args.count is not None and args.count <= 0:
+        print(
+            f"\n[ERROR] Invalid --count value '{args.count}'. Packet limit must be a positive integer (>= 1).",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.timeout is not None and args.timeout <= 0:
+        print(
+            f"\n[ERROR] Invalid --timeout value '{args.timeout}'. Duration timeout must be greater than 0 seconds.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.pcap and (args.count is not None or args.timeout is not None):
+        print(
+            "\n[ERROR] --count and --timeout options are only applicable to live capture (--interface), not offline PCAP.",
+            file=sys.stderr,
+        )
+        return 1
+
     db_file = Path(args.db)
 
+    # 4. Handle live capture mode
+    if args.interface:
+        import time
+
+        print("=" * 60)
+        print("Mini-IDS: Live Network Intrusion Detection Capture")
+        print("=" * 60)
+        print(f"Interface:    {args.interface}")
+        print(f"Database:     {db_file}")
+        if args.count is not None:
+            print(f"Packet Limit: {args.count}")
+        if args.timeout is not None:
+            print(f"Timeout:      {args.timeout}s")
+        print("-" * 60)
+        print("Capturing packets and evaluating detection rules (Press Ctrl+C to stop)...")
+
+        worker = LiveCaptureWorker(
+            interface=args.interface,
+            db_path=db_file,
+            packet_limit=args.count,
+            duration_seconds=args.timeout,
+        )
+
+        try:
+            worker.start()
+            while worker.is_running:
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            print("\nStopping capture...")
+        finally:
+            worker.stop()
+
+        status = worker.get_status()
+        print("-" * 60)
+        print("Capture Complete!")
+        print(f"  * Status:           {status['status']}")
+        print(f"  * Packets captured: {status['packets_captured']}")
+        print(f"  * Alerts triggered: {status['alerts_generated']}")
+        print(f"  * Elapsed time:     {status['elapsed_seconds']:.2f}s")
+        print(f"  * Database saved:   {status['db_path']}")
+        if status.get("error_message"):
+            print(f"  * Error:            {status['error_message']}", file=sys.stderr)
+            return 1
+        print("=" * 60)
+        return 0
+
+    # 4. Handle offline PCAP mode
+    pcap_file = Path(args.pcap)
     print("=" * 60)
     print("Mini-IDS: Offline Network Intrusion Detection System")
     print("=" * 60)
