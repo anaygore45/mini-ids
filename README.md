@@ -3,8 +3,8 @@
 A lightweight, modular, educational Network Intrusion Detection System (NIDS) built with Python, Scapy, SQLite, and Streamlit on Windows.
 
 > [!NOTE]
-> **Project Status: Live Packet Capture & Security Analytics Completed**
-> The project provides dual ingestion pipelines (offline PCAP analysis and Npcap live packet capture), persistent SQLite database storage, heuristic detection rules (Port Scan, SYN Rate, Traffic Anomaly), an automated test suite (97 passed), and an interactive Streamlit Security Analytics Dashboard with alert investigation and live capture controls.
+> **Project Status: Live Packet Capture, Demonstration Mode & Security Analytics Completed**
+> The project provides dual ingestion pipelines (offline PCAP analysis and Npcap live packet capture), persistent SQLite database storage, heuristic detection rules (Port Scan, SYN Rate, Traffic Anomaly), an automated test suite (103 passed), a deterministic synthetic demonstration mode for cloud hosting, and an interactive Streamlit Security Analytics Dashboard with alert investigation and live capture controls.
 
 ---
 
@@ -21,6 +21,7 @@ Mini-IDS operates as a **passive detection system**: it logs events and notifies
 - **Dual Ingestion Architecture:**
   - **Offline PCAP/PCAPNG Ingestion (Primary):** Deterministic, repeatable ingestion of network trace files via Scapy.
   - **Optional Live Capture:** Passive live sniffing on Windows interfaces (requires administrative privileges and Npcap).
+  - **Hosted Demonstration Mode:** Built-in deterministic synthetic telemetry for public cloud evaluation without exposing local data.
 - **Three Core Detection Modules:**
   1. **TCP Port Scan Detection:** Identifies rapid probing across multiple unique destination ports on a target host within a configurable time window.
   2. **TCP SYN Rate Anomaly:** Flags abnormally elevated rates of SYN packets without completed handshakes (e.g., SYN flood patterns or fast scans).
@@ -64,8 +65,9 @@ mini-ids/
 │   └── traffic_anomaly.py      # Volumetric traffic anomaly detector
 ├── storage/                    # Persistent alert & packet database
 │   ├── __init__.py
-│   └── database.py             # SQLite schema, queries, and aggregations
-├── tests/                      # Comprehensive test suite (97 tests)
+│   ├── database.py             # SQLite schema, queries, and aggregations
+│   └── demo_data.py            # Deterministic synthetic dataset for hosted demonstration mode
+├── tests/                      # Comprehensive test suite (103 tests)
 │   ├── __init__.py
 │   ├── test_capture.py         # Capture and packet normalization tests
 │   ├── test_detection.py       # Core detector logic and alert tests
@@ -73,7 +75,8 @@ mini-ids/
 │   ├── test_storage.py         # SQLite CRUD, indexing, and aggregation tests
 │   ├── test_end_to_end.py      # Full pipeline CLI ingestion tests
 │   ├── test_dashboard.py       # Headless Streamlit integration and chart tests
-│   └── test_live_capture.py    # Live capture worker, interface enumeration, and UI tests
+│   ├── test_live_capture.py    # Live capture worker, interface enumeration, and UI tests
+│   └── test_demo_mode.py       # Demonstration mode and synthetic dataset tests
 ├── data/                       # Local data folder (.gitignore excludes *.db and *.pcap)
 │   └── .gitkeep
 ├── docs/                       # Technical documentation
@@ -126,7 +129,7 @@ pip install -r requirements.txt
 ```
 
 ### Step 4: Run the Automated Test Suite
-Verify that all 97 unit, integration, and dashboard tests pass:
+Verify that all 103 unit, integration, and dashboard tests pass:
 ```powershell
 pytest -v
 ```
@@ -178,6 +181,22 @@ streamlit run app.py
 
 Open your browser to `http://localhost:8501`.
 
+#### Local Mode vs. Hosted Demonstration Mode
+
+Mini-IDS dynamically supports two execution environments to ensure safe, useful presentations while protecting private data:
+
+1. **Local Workstation Mode (Full Capabilities):**
+   - **Persistence:** Connects directly to `data/mini_ids.db` (or any custom local SQLite database).
+   - **Real-Time Live Sniffing:** Provides an active control panel to select physical Wi-Fi, Ethernet, or Loopback adapters and capture live packets via Npcap.
+   - **Data Privacy:** Raw capture files and databases stay strictly on the local machine and are excluded from Git.
+
+2. **Hosted Demonstration Mode (`https://tanmay-mini-ids.streamlit.app`):**
+   - **Deterministic Synthetic Telemetry:** When deployed on Streamlit Community Cloud (where `data/mini_ids.db` is intentionally omitted), the app automatically enters Demonstration Mode, populating a sanitized synthetic database in `data/demo_synthetic.db`.
+   - **Interactive Evaluation:** Evaluates 77 synthetic packets and 4 correlated intrusion alerts across TCP, UDP, and ICMP protocols using RFC 5737 documentation addresses (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`).
+   - **Full UI Exploration:** Mentors and reviewers can interact with all KPI metric cards, alert severity distributions, rule breakdowns, timeline bar charts, and the **Alert Investigation workflow** with real packet evidence.
+   - **Live Capture Protection:** Live packet sniffing is safely disabled in cloud demonstration mode to avoid permission errors (cloud containers do not have access to developer host adapters or raw socket capabilities).
+   - **Manual Toggle:** Developers can toggle between Local Mode and Demonstration Mode at any time using the sidebar toggle: `Demonstration Mode (Synthetic)`.
+
 #### Dashboard Capabilities:
 - **📡 Live Packet Capture Panel:**
   - Select any discovered network adapter (e.g., Wi-Fi, Ethernet, Loopback).
@@ -195,13 +214,13 @@ Open your browser to `http://localhost:8501`.
 
 ## 8. Automated Testing & Verification
 
-The test suite covers unit logic, edge cases, database persistence, live capture workers, and dashboard rendering:
+The test suite covers unit logic, edge cases, database persistence, live capture workers, demonstration mode, and dashboard rendering:
 
 ```powershell
 pytest -v
 ```
 
-**Test Coverage Summary (97 tests passed):**
+**Test Coverage Summary (103 tests passed):**
 - `test_capture.py`: Packet parsing, IP/TCP/UDP extraction, malformed packet handling (10 tests).
 - `test_detection.py`: Port scan, SYN rate, and traffic volume anomaly detection rules (16 tests).
 - `test_boundary_detection.py`: Window boundary timing, threshold edge cases, packet suppression (13 tests).
@@ -209,6 +228,7 @@ pytest -v
 - `test_end_to_end.py`: CLI ingestion pipeline execution and database verification (5 tests).
 - `test_dashboard.py`: Headless Streamlit runner tests, data framing, and Altair chart construction (12 tests).
 - `test_live_capture.py`: Interface enumeration, worker lifecycle, duplicate-start prevention, packet limits, timeout triggers, synthetic integration, and UI controls (20 tests).
+- `test_demo_mode.py`: Synthetic packet determinism, RFC 5737 compliance, correlated evidence validation, demo DB lifecycle, demo mode banner rendering, and local mode preservation (6 tests).
 
 ---
 
@@ -216,6 +236,7 @@ pytest -v
 
 - **Npcap Installation:** On Windows, live capture requires [Npcap](https://npcap.com/) installed with *"WinPcap API-compatible Mode"* enabled. If Npcap is missing, `main.py --list-interfaces` will indicate no interfaces found.
 - **Administrator Privileges:** Capturing promiscuous traffic on physical Wi-Fi or Ethernet adapters often requires running PowerShell / Terminal as Administrator. If access is denied, run the terminal as Administrator or use the Loopback interface (`127.0.0.1`) for local testing.
+- **Cloud Hosting / Streamlit Community Cloud:** Live packet sniffing is unavailable in cloud container environments due to isolation boundaries (`CAP_NET_RAW` withheld). The hosted deployment operates in read-only Demonstration Mode using sanitized synthetic telemetry. Full live packet capture is supported when running locally on Windows.
 - **Passive Sniffing:** Mini-IDS is strictly passive. It does not inject packets, reset TCP sessions, or block traffic.
 - **Heuristic Detectors:** Detection rules evaluate sliding-window statistics against threshold heuristics. They provide decision-support telemetry rather than definitive proof of host compromise.
 - **Offline PCAP Support:** Offline PCAP ingestion remains fully functional and does not require Npcap or administrator privileges.

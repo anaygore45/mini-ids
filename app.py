@@ -19,6 +19,7 @@ This dashboard is strictly a read-only presentation layer.
 from collections import Counter
 from datetime import datetime, timezone
 import logging
+import os
 from pathlib import Path
 import sqlite3
 from typing import Any, Dict, List, Optional, Union
@@ -29,6 +30,7 @@ import streamlit as st
 
 from capture.live_capture import get_available_interfaces, get_live_worker
 from storage.database import DEFAULT_DB_PATH, DatabaseManager
+from storage.demo_data import DEFAULT_DEMO_DB_PATH, get_or_create_demo_database
 
 logger = logging.getLogger("mini_ids.dashboard")
 
@@ -160,9 +162,25 @@ def build_ranking_chart(
     return chart
 
 
-def render_live_capture_section(target_db_path: Path) -> None:
+def render_live_capture_section(target_db_path: Path, is_demo_mode: bool = False) -> None:
     """Render the Live Packet Capture control panel and real-time status."""
     st.markdown("### 📡 Live Packet Capture (Passive Sniffer)")
+
+    if is_demo_mode:
+        st.info(
+            "☁️ **Live Packet Capture is disabled in Hosted Demonstration Mode.**\n\n"
+            "Passive live packet sniffing requires direct physical network adapter access, administrative "
+            "privileges, and local Npcap kernel drivers on a host workstation. In this hosted cloud "
+            "demonstration, the dashboard operates in safe, read-only forensic mode.\n\n"
+            "To perform real-time packet capture on your local Wi-Fi or Ethernet adapter, run Mini-IDS "
+            "locally on Windows using:\n"
+            "```powershell\n"
+            "streamlit run app.py\n"
+            "```"
+        )
+        st.divider()
+        return
+
     st.caption(
         "Capture live traffic from local network adapters using Npcap. Packets are evaluated "
         "against detection rules and saved directly to the active SQLite database."
@@ -368,11 +386,37 @@ def render_dashboard() -> None:
     if st.sidebar.button("🔄 Refresh Data"):
         st.rerun()
 
-    target_db_path = Path(db_path_input.strip())
+    # Automatically activate demo mode if DEFAULT_DB_PATH does not exist or if MINI_IDS_DEMO_MODE is set
+    default_demo_active = (not DEFAULT_DB_PATH.is_file()) or (
+        os.environ.get("MINI_IDS_DEMO_MODE", "").lower() in ("1", "true", "yes")
+    )
+
+    demo_toggle = st.sidebar.toggle(
+        "Demonstration Mode (Synthetic)",
+        value=default_demo_active,
+        help="Enable sanitized synthetic demonstration dataset for cloud hosting or evaluation without local capture files.",
+        key="app_demo_toggle",
+    )
+
+    # If the user or test explicitly customized the text input path, respect it; otherwise use demo mode if toggle is active
+    raw_path = Path(db_path_input.strip())
+    custom_path_provided = bool(raw_path != DEFAULT_DB_PATH)
+    is_demo_mode = demo_toggle and not custom_path_provided
+
+    if is_demo_mode:
+        target_db_path = get_or_create_demo_database()
+        st.sidebar.info("🧪 **Operational Mode:** Demo Mode (Synthetic)")
+        st.sidebar.caption(
+            "Using deterministic synthetic demonstration dataset with RFC 5737 documentation IPs. "
+            "Real captures and local databases are not accessed."
+        )
+    else:
+        target_db_path = raw_path
+        st.sidebar.caption(f"📁 **Active Database:** `{target_db_path}`")
 
     # Requirement 3: Check database existence BEFORE opening connection.
     # Do not silently create a new database file just by launching the dashboard.
-    if not target_db_path.is_file():
+    if not is_demo_mode and not target_db_path.is_file():
         st.warning(f"Database file not found: `{target_db_path}`")
         st.info(
             "**No database exists at the specified path.**\n\n"
@@ -381,12 +425,20 @@ def render_dashboard() -> None:
             "```powershell\n"
             "python main.py --pcap data/sample.pcap\n"
             "```\n\n"
-            "Or enter a valid database path in the sidebar."
+            "Or toggle **Demonstration Mode (Synthetic)** in the sidebar to explore simulated telemetry."
         )
         return
 
     # Live Packet Capture Section
-    render_live_capture_section(target_db_path)
+    render_live_capture_section(target_db_path, is_demo_mode=is_demo_mode)
+
+    # Demonstration Mode top notification banner
+    if is_demo_mode:
+        st.info(
+            "🧪 **Demonstration Mode Active** — Displaying sanitized synthetic network telemetry and simulated intrusion "
+            "alerts for evaluation and mentor review. All events are synthetic and explicitly labeled. "
+            "No real network packets, private host data, or live packet captures are active in this mode."
+        )
 
     # Database Retrieval and UI Rendering with reliable connection cleanup
     try:
