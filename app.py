@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 import json
 import logging
 import os
+import sys
+import sklearn
 from pathlib import Path
 import sqlite3
 import time
@@ -332,8 +334,15 @@ def render_dashboard() -> None:
     if st.sidebar.button("🔄 Refresh Data"):
         st.rerun()
 
-    # Automatically activate demo mode if DEFAULT_DB_PATH does not exist or if MINI_IDS_DEMO_MODE is set
-    default_demo_active = (not DEFAULT_DB_PATH.is_file()) or (
+    # Automatically activate demo mode if DEFAULT_DB_PATH does not exist, has no records, or if MINI_IDS_DEMO_MODE is set
+    default_has_data = False
+    if DEFAULT_DB_PATH.is_file():
+        try:
+            with DatabaseManager(DEFAULT_DB_PATH) as _chk:
+                default_has_data = (_chk.get_packet_count() > 0 or _chk.get_alert_count() > 0)
+        except Exception:
+            default_has_data = False
+    default_demo_active = (not default_has_data) or (
         os.environ.get("MINI_IDS_DEMO_MODE", "").lower() in ("1", "true", "yes")
     )
 
@@ -408,20 +417,18 @@ def render_dashboard() -> None:
             packet_count = db.get_packet_count()
             alert_count = db.get_alert_count()
 
-            # Empty database state
-            if packet_count == 0 and alert_count == 0:
-                if selected_page in ("Overview", "Live Monitoring"):
-                    render_live_capture_section(target_db_path, is_demo_mode=is_demo_mode)
-                st.info(
-                    f"Connected to database `{target_db_path}`, but it contains no stored packets or alerts.\n\n"
-                    "Run an offline PCAP analysis to populate this database:\n\n"
-                    "```powershell\n"
-                    f"python main.py --pcap <path_to_pcap> --db \"{target_db_path}\"\n"
-                    "```"
-                )
-                return
+            # Global Model Resolution (Resolves active models before page dispatch)
+            registry = ModelRegistry(db_path=target_db_path)
+            try:
+                active_sup = db.get_active_model("supervised_binary") or db.get_active_model()
+            except Exception:
+                active_sup = None
+            try:
+                active_anom = db.get_active_model("anomaly_isolation_forest")
+            except Exception:
+                active_anom = None
 
-            all_alerts = db.get_alerts(order="DESC")
+            all_alerts = db.get_alerts(order="DESC") if alert_count > 0 else []
 
             # Sidebar Filters (Preserves exact selectbox & checkbox order for tests)
             st.sidebar.header("Filter Options")
@@ -526,307 +533,316 @@ def render_dashboard() -> None:
             if selected_page == "Overview":
                 render_live_capture_section(target_db_path, is_demo_mode=is_demo_mode)
 
-                if enable_time_filter and scope_start_ts is not None and scope_end_ts is not None:
-                    st.subheader("Security Overview (Scoped to Selected Interval)")
-                    st.caption(
-                        f"Showing metrics between `{format_timestamp(scope_start_ts)}` and `{format_timestamp(scope_end_ts)}`. "
-                        "Uncheck 'Filter by Time Range' in sidebar to view cumulative totals across all stored history."
+                if packet_count == 0 and alert_count == 0:
+                    st.info(
+                        f"Connected to database `{target_db_path}`, but it contains no stored packets or alerts.\n\n"
+                        "Run an offline PCAP analysis to populate this database:\n\n"
+                        "```powershell\n"
+                        f"python main.py --pcap <path_to_pcap> --db \"{target_db_path}\"\n"
+                        "```"
                     )
                 else:
-                    st.subheader("Stored Totals (Cumulative Across All Analyses)")
-                    st.caption(
-                        "Cumulative metrics reflect the complete database state across all ingested PCAP runs and live captures. "
-                        "Historical PCAP data and recent captures are indexed in SQLite."
-                    )
-
-                # Primary KPI Row
-                kpi_col1, kpi_col2, kpi_col3, kpi_col4 = st.columns(4)
-                kpi_col1.metric("Total Stored Packets", f"{kpis['total_packets']:,}")
-                kpi_col2.metric("Total Stored Alerts", f"{kpis['total_alerts']:,}")
-                kpi_col3.metric("High-Severity Alerts", f"{kpis['high_severity_alerts']:,}")
-                kpi_col4.metric("Distinct Alert Sources", f"{kpis['distinct_alert_sources']:,}")
-
-                # Rule Counts Row (preserves compatibility with test assertions)
-                rule_counts = Counter(a["rule_name"] for a in all_alerts if a.get("rule_name"))
-                if rule_counts:
-                    st.markdown("**Alert Counts Grouped by Rule / Type:**")
-                    rule_columns = st.columns(max(len(rule_counts), 1))
-                    for col, (rule_name, count) in zip(rule_columns, sorted(rule_counts.items())):
-                        col.metric(rule_name, f"{count:,}")
-
-                # Model Readiness Banner
-                registry = ModelRegistry(db_path=target_db_path)
-                active_sup = db.get_active_model("supervised_binary") or db.get_active_model()
-                active_anom = db.get_active_model("anomaly_isolation_forest")
-
-                st.markdown("---")
-                mod_c1, mod_c2 = st.columns(2)
-                with mod_c1:
-                    if active_sup:
-                        st.success(
-                            f"🤖 **Active Supervised Model:** `{active_sup['algorithm']}` ({active_sup['version']})\n\n"
-                            f"Accuracy: **{active_sup['metrics'].get('accuracy', 0)*100:.2f}%** | "
-                            f"F1 Score: **{active_sup['metrics'].get('f1_weighted', 0)*100:.2f}%**"
+                    if enable_time_filter and scope_start_ts is not None and scope_end_ts is not None:
+                        st.subheader("Security Overview (Scoped to Selected Interval)")
+                        st.caption(
+                            f"Showing metrics between `{format_timestamp(scope_start_ts)}` and `{format_timestamp(scope_end_ts)}`. "
+                            "Uncheck 'Filter by Time Range' in sidebar to view cumulative totals across all stored history."
                         )
                     else:
-                        st.info("ℹ️ **Supervised Model:** No active model selected. Defaulting to heuristic rule engine.")
-                with mod_c2:
-                    if active_anom:
-                        st.success(
-                            f"🌲 **Active Anomaly Detector:** `Isolation Forest` ({active_anom['version']})\n\n"
-                            f"Features: **{len(active_anom['feature_schema'])}** inputs | "
-                            f"Threshold: **{active_anom['metrics'].get('score_threshold', 0.5):.3f}**"
-                        )
-                    else:
-                        st.info("ℹ️ **Anomaly Detector:** Unsupervised detector not active.")
-
-                st.divider()
-
-                # Analytics Tabs
-                st.subheader("📊 Security Analytics")
-                tab_alerts, tab_traffic = st.tabs(["🚨 Alert Analytics", "🌐 Network Traffic Analytics"])
-
-                with tab_alerts:
-                    st.caption(f"Showing alert analytics filtered by Rule: **{selected_rule}** | Severity: **{selected_severity}**.")
-                    dist_col1, dist_col2 = st.columns(2)
-                    with dist_col1:
-                        st.markdown("##### Alert Severity Distribution")
-                        sev_data = db.get_alert_severity_distribution(
-                            start_time=scope_start_ts if enable_time_filter else None,
-                            end_time=scope_end_ts if enable_time_filter else None,
-                            rule=selected_rule,
-                        )
-                        sev_chart = build_severity_chart(sev_data)
-                        if sev_chart is not None:
-                            st.altair_chart(sev_chart, width="stretch")
-                        else:
-                            st.info("No alert severity records available.")
-
-                    with dist_col2:
-                        st.markdown("##### Alerts by Detection Rule")
-                        rule_data = db.get_alerts_by_rule(
-                            start_time=scope_start_ts if enable_time_filter else None,
-                            end_time=scope_end_ts if enable_time_filter else None,
-                            severity=selected_severity,
-                        )
-                        rule_chart = build_rule_chart(rule_data)
-                        if rule_chart is not None:
-                            st.altair_chart(rule_chart, width="stretch")
-                        else:
-                            st.info("No detection rule records available.")
-
-                    st.markdown("##### Alert Timeline (UTC)")
-                    alert_timeline_data = db.get_alert_timeline(
-                        start_time=scope_start_ts if enable_time_filter else None,
-                        end_time=scope_end_ts if enable_time_filter else None,
-                        rule=selected_rule,
-                        severity=selected_severity,
-                    )
-                    alert_tl_chart = build_timeline_chart(alert_timeline_data)
-                    if alert_tl_chart is not None:
-                        st.altair_chart(alert_tl_chart, width="stretch")
-
-                    rank_col1, rank_col2 = st.columns(2)
-                    with rank_col1:
-                        st.markdown("##### Top Offending Source IPs")
-                        top_sources = db.get_top_alert_sources(
-                            start_time=scope_start_ts if enable_time_filter else None,
-                            end_time=scope_end_ts if enable_time_filter else None,
-                            rule=selected_rule,
-                            severity=selected_severity,
-                        )
-                        src_chart = build_ranking_chart(
-                            top_sources,
-                            category_field="src_ip",
-                            value_field="count",
-                            category_title="Source IP",
-                            value_title="Alert Count",
-                            bar_color=THEME_COLORS["critical"],
-                        )
-                        if src_chart is not None:
-                            st.altair_chart(src_chart, width="stretch")
-
-                    with rank_col2:
-                        st.markdown("##### Top Targeted Destination IPs")
-                        top_dests = db.get_top_alert_destinations(
-                            start_time=scope_start_ts if enable_time_filter else None,
-                            end_time=scope_end_ts if enable_time_filter else None,
-                            rule=selected_rule,
-                            severity=selected_severity,
-                        )
-                        dst_chart = build_ranking_chart(
-                            top_dests,
-                            category_field="dst_ip",
-                            value_field="count",
-                            category_title="Destination IP",
-                            value_title="Alert Count",
-                            bar_color=THEME_COLORS["primary_accent"],
-                        )
-                        if dst_chart is not None:
-                            st.altair_chart(dst_chart, width="stretch")
-
-                with tab_traffic:
-                    st.caption(f"Showing raw packet traffic filtered by Protocol: **{selected_protocol}**.")
-                    pcol1, pcol2 = st.columns(2)
-                    with pcol1:
-                        st.markdown("##### Protocol Distribution")
-                        proto_data = db.get_protocol_distribution(
-                            start_time=scope_start_ts if enable_time_filter else None,
-                            end_time=scope_end_ts if enable_time_filter else None,
-                            protocol=selected_protocol if selected_protocol != "All" else None,
-                        )
-                        p_chart = build_ranking_chart(
-                            proto_data,
-                            category_field="protocol",
-                            value_field="count",
-                            category_title="Protocol",
-                            value_title="Packet Count",
-                            bar_color=THEME_COLORS["secondary_accent"],
-                        )
-                        if p_chart is not None:
-                            st.altair_chart(p_chart, width="stretch")
-
-                    with pcol2:
-                        st.markdown("##### Top Destination Ports")
-                        port_data = db.get_top_destination_ports(
-                            start_time=scope_start_ts if enable_time_filter else None,
-                            end_time=scope_end_ts if enable_time_filter else None,
-                            protocol=selected_protocol if selected_protocol != "All" else None,
-                        )
-                        port_chart = build_ranking_chart(
-                            port_data,
-                            category_field="dst_port",
-                            value_field="packet_count",
-                            category_title="Destination Port",
-                            value_title="Packet Count",
-                            bar_color=THEME_COLORS["primary_accent"],
-                        )
-                        if port_chart is not None:
-                            st.altair_chart(port_chart, width="stretch")
-
-                st.divider()
-
-                # Recent Security Alerts Table (Must be dataframe[0] for tests)
-                st.subheader("Recent Security Alerts")
-                if not filtered_alerts:
-                    st.info("No alerts match the selected filter criteria.")
-                else:
-                    alert_rows = []
-                    for a in filtered_alerts:
-                        alert_rows.append({
-                            "Alert ID": a.get("id"),
-                            "Timestamp": format_timestamp(a.get("timestamp")),
-                            "Rule": a.get("rule_name", "UNKNOWN"),
-                            "Severity": a.get("severity", "UNKNOWN"),
-                            "Detection Method": a.get("detection_method", "HEURISTIC"),
-                            "Source IP": a.get("src_ip") or "N/A",
-                            "Destination IP": a.get("dst_ip") or "N/A",
-                            "Observed": round(float(a.get("observed_value", 0.0)), 2),
-                            "Threshold": round(float(a.get("threshold", 0.0)), 2),
-                            "Window (s)": round(float(a.get("window_seconds", 0.0)), 1),
-                            "Description / Reason": a.get("message", ""),
-                        })
-                    df_alerts = pd.DataFrame(alert_rows)
-                    st.dataframe(df_alerts, width="stretch")
-
-                st.divider()
-
-                # Alert Investigation Workflow (Must have selectbox[0] and dataframe[1] for tests)
-                st.subheader("🔍 Alert Investigation")
-                if not filtered_alerts:
-                    st.info("No alerts available to investigate with the current filter criteria.")
-                else:
-                    alert_id_to_label = {
-                        a["id"]: (
-                            f"Alert #{a['id']} | {a.get('rule_name', 'UNKNOWN')} [{a.get('severity', 'UNKNOWN')}] | "
-                            f"{a.get('src_ip') or 'N/A'} -> {a.get('dst_ip') or 'N/A'} | "
-                            f"{format_timestamp(a.get('timestamp'))}"
-                        )
-                        for a in filtered_alerts
-                    }
-                    selected_alert_id = st.selectbox(
-                        "Select Alert to Investigate",
-                        options=list(alert_id_to_label.keys()),
-                        format_func=lambda aid: alert_id_to_label[aid],
-                        key="overview_alert_select",
-                    )
-                    selected_alert = db.get_alert_by_id(selected_alert_id)
-                    if selected_alert:
-                        st.markdown(f"#### Alert Details — ID #{selected_alert['id']}")
-                        c1, c2, c3, c4 = st.columns(4)
-                        c1.metric("Detection Rule", selected_alert.get("rule_name", "UNKNOWN"))
-                        c2.metric("Severity", selected_alert.get("severity", "UNKNOWN"))
-                        c3.metric("Observed / Threshold", f"{selected_alert.get('observed_value', 0):.2f} / {selected_alert.get('threshold', 0):.2f}")
-                        c4.metric("Window Duration", f"{selected_alert.get('window_seconds', 0):.1f} s")
-
-                        alert_ts = float(selected_alert.get("timestamp", 0.0))
-                        win_sec = float(selected_alert.get("window_seconds", 0.0))
-                        effective_start = alert_ts - win_sec
-                        effective_end = alert_ts
-
-                        evidence_packets = db.get_related_packets(
-                            src_ip=selected_alert.get("src_ip"),
-                            dst_ip=selected_alert.get("dst_ip"),
-                            start_time=effective_start,
-                            end_time=effective_end,
-                            limit=500,
-                            order="ASC",
+                        st.subheader("Stored Totals (Cumulative Across All Analyses)")
+                        st.caption(
+                            "Cumulative metrics reflect the complete database state across all ingested PCAP runs and live captures. "
+                            "Historical PCAP data and recent captures are indexed in SQLite."
                         )
 
-                        st.markdown("#### Related Packet Evidence")
-                        if not evidence_packets:
-                            st.warning(
-                                f"No matching packet records found for "
-                                f"{selected_alert.get('src_ip') or 'any'} -> {selected_alert.get('dst_ip') or 'any'} "
-                                f"within the detection interval `[{format_timestamp(effective_start)} — {format_timestamp(effective_end)}]`."
+                    # Primary KPI Row
+                    kpi_col1, kpi_col2, kpi_col3, kpi_col4 = st.columns(4)
+                    kpi_col1.metric("Total Stored Packets", f"{kpis['total_packets']:,}")
+                    kpi_col2.metric("Total Stored Alerts", f"{kpis['total_alerts']:,}")
+                    kpi_col3.metric("High-Severity Alerts", f"{kpis['high_severity_alerts']:,}")
+                    kpi_col4.metric("Distinct Alert Sources", f"{kpis['distinct_alert_sources']:,}")
+
+                    # Rule Counts Row (preserves compatibility with test assertions)
+                    rule_counts = Counter(a["rule_name"] for a in all_alerts if a.get("rule_name"))
+                    if rule_counts:
+                        st.markdown("**Alert Counts Grouped by Rule / Type:**")
+                        rule_columns = st.columns(max(len(rule_counts), 1))
+                        for col, (rule_name, count) in zip(rule_columns, sorted(rule_counts.items())):
+                            col.metric(rule_name, f"{count:,}")
+
+                    # Model Readiness Banner
+                    registry = ModelRegistry(db_path=target_db_path)
+                    active_sup = db.get_active_model("supervised_binary") or db.get_active_model()
+                    active_anom = db.get_active_model("anomaly_isolation_forest")
+
+                    st.markdown("---")
+                    mod_c1, mod_c2 = st.columns(2)
+                    with mod_c1:
+                        if active_sup:
+                            st.success(
+                                f"🤖 **Active Supervised Model:** `{active_sup['algorithm']}` ({active_sup['version']})\n\n"
+                                f"Accuracy: **{active_sup['metrics'].get('accuracy', 0)*100:.2f}%** | "
+                                f"F1 Score: **{active_sup['metrics'].get('f1_weighted', 0)*100:.2f}%**"
                             )
                         else:
-                            st.success(f"Found **{len(evidence_packets)}** related packet record(s) matching detection window.")
-                            evidence_rows = []
-                            for p in evidence_packets:
-                                evidence_rows.append({
-                                    "Timestamp": format_timestamp(p.get("timestamp")),
-                                    "Epoch": f"{p.get('timestamp', 0.0):.6f}",
-                                    "Protocol": p.get("protocol", ""),
-                                    "Source IP": p.get("src_ip", ""),
-                                    "Destination IP": p.get("dst_ip", ""),
-                                    "Source Port": str(p["src_port"]) if p.get("src_port") is not None else "-",
-                                    "Destination Port": str(p["dst_port"]) if p.get("dst_port") is not None else "-",
-                                    "Length (Bytes)": p.get("length", 0),
-                                    "TCP Flags": p.get("tcp_flags") if p.get("tcp_flags") is not None else "-",
-                                })
-                            df_evidence = pd.DataFrame(evidence_rows)
-                            st.dataframe(df_evidence, width="stretch")
+                            st.info("ℹ️ **Supervised Model:** No active model selected. Defaulting to heuristic rule engine.")
+                    with mod_c2:
+                        if active_anom:
+                            st.success(
+                                f"🌲 **Active Anomaly Detector:** `Isolation Forest` ({active_anom['version']})\n\n"
+                                f"Features: **{len(active_anom['feature_schema'])}** inputs | "
+                                f"Threshold: **{active_anom['metrics'].get('score_threshold', 0.5):.3f}**"
+                            )
+                        else:
+                            st.info("ℹ️ **Anomaly Detector:** Unsupervised detector not active.")
 
-                st.divider()
+                    st.divider()
 
-                # Recent Network Traffic Table (Must be dataframe[2] for tests)
-                st.subheader("Recent Network Traffic")
-                filtered_packets = raw_packets
-                if selected_protocol != "All":
-                    filtered_packets = [
-                        p for p in filtered_packets
-                        if p.get("protocol", "").upper() == selected_protocol.upper()
-                    ]
-                filtered_packets = filtered_packets[: int(packet_limit)]
+                    # Analytics Tabs
+                    st.subheader("📊 Security Analytics")
+                    tab_alerts, tab_traffic = st.tabs(["🚨 Alert Analytics", "🌐 Network Traffic Analytics"])
 
-                if not filtered_packets:
-                    st.info("No packets match the selected traffic filters.")
-                else:
-                    packet_rows = []
-                    for p in filtered_packets:
-                        packet_rows.append({
-                            "Timestamp": format_timestamp(p.get("timestamp")),
-                            "Source IP": p.get("src_ip", ""),
-                            "Destination IP": p.get("dst_ip", ""),
-                            "Protocol": p.get("protocol", ""),
-                            "Length (Bytes)": p.get("length", 0),
-                            "Source Port": str(p["src_port"]) if p.get("src_port") is not None else "-",
-                            "Destination Port": str(p["dst_port"]) if p.get("dst_port") is not None else "-",
-                            "TCP Flags": p.get("tcp_flags") if p.get("tcp_flags") is not None else "-",
-                        })
-                    df_packets = pd.DataFrame(packet_rows)
-                    st.dataframe(df_packets, width="stretch")
+                    with tab_alerts:
+                        st.caption(f"Showing alert analytics filtered by Rule: **{selected_rule}** | Severity: **{selected_severity}**.")
+                        dist_col1, dist_col2 = st.columns(2)
+                        with dist_col1:
+                            st.markdown("##### Alert Severity Distribution")
+                            sev_data = db.get_alert_severity_distribution(
+                                start_time=scope_start_ts if enable_time_filter else None,
+                                end_time=scope_end_ts if enable_time_filter else None,
+                                rule=selected_rule,
+                            )
+                            sev_chart = build_severity_chart(sev_data)
+                            if sev_chart is not None:
+                                st.altair_chart(sev_chart, width="stretch")
+                            else:
+                                st.info("No alert severity records available.")
+
+                        with dist_col2:
+                            st.markdown("##### Alerts by Detection Rule")
+                            rule_data = db.get_alerts_by_rule(
+                                start_time=scope_start_ts if enable_time_filter else None,
+                                end_time=scope_end_ts if enable_time_filter else None,
+                                severity=selected_severity,
+                            )
+                            rule_chart = build_rule_chart(rule_data)
+                            if rule_chart is not None:
+                                st.altair_chart(rule_chart, width="stretch")
+                            else:
+                                st.info("No detection rule records available.")
+
+                        st.markdown("##### Alert Timeline (UTC)")
+                        alert_timeline_data = db.get_alert_timeline(
+                            start_time=scope_start_ts if enable_time_filter else None,
+                            end_time=scope_end_ts if enable_time_filter else None,
+                            rule=selected_rule,
+                            severity=selected_severity,
+                        )
+                        alert_tl_chart = build_timeline_chart(alert_timeline_data)
+                        if alert_tl_chart is not None:
+                            st.altair_chart(alert_tl_chart, width="stretch")
+
+                        rank_col1, rank_col2 = st.columns(2)
+                        with rank_col1:
+                            st.markdown("##### Top Offending Source IPs")
+                            top_sources = db.get_top_alert_sources(
+                                start_time=scope_start_ts if enable_time_filter else None,
+                                end_time=scope_end_ts if enable_time_filter else None,
+                                rule=selected_rule,
+                                severity=selected_severity,
+                            )
+                            src_chart = build_ranking_chart(
+                                top_sources,
+                                category_field="src_ip",
+                                value_field="count",
+                                category_title="Source IP",
+                                value_title="Alert Count",
+                                bar_color=THEME_COLORS["critical"],
+                            )
+                            if src_chart is not None:
+                                st.altair_chart(src_chart, width="stretch")
+
+                        with rank_col2:
+                            st.markdown("##### Top Targeted Destination IPs")
+                            top_dests = db.get_top_alert_destinations(
+                                start_time=scope_start_ts if enable_time_filter else None,
+                                end_time=scope_end_ts if enable_time_filter else None,
+                                rule=selected_rule,
+                                severity=selected_severity,
+                            )
+                            dst_chart = build_ranking_chart(
+                                top_dests,
+                                category_field="dst_ip",
+                                value_field="count",
+                                category_title="Destination IP",
+                                value_title="Alert Count",
+                                bar_color=THEME_COLORS["primary_accent"],
+                            )
+                            if dst_chart is not None:
+                                st.altair_chart(dst_chart, width="stretch")
+
+                    with tab_traffic:
+                        st.caption(f"Showing raw packet traffic filtered by Protocol: **{selected_protocol}**.")
+                        pcol1, pcol2 = st.columns(2)
+                        with pcol1:
+                            st.markdown("##### Protocol Distribution")
+                            proto_data = db.get_protocol_distribution(
+                                start_time=scope_start_ts if enable_time_filter else None,
+                                end_time=scope_end_ts if enable_time_filter else None,
+                                protocol=selected_protocol if selected_protocol != "All" else None,
+                            )
+                            p_chart = build_ranking_chart(
+                                proto_data,
+                                category_field="protocol",
+                                value_field="count",
+                                category_title="Protocol",
+                                value_title="Packet Count",
+                                bar_color=THEME_COLORS["secondary_accent"],
+                            )
+                            if p_chart is not None:
+                                st.altair_chart(p_chart, width="stretch")
+
+                        with pcol2:
+                            st.markdown("##### Top Destination Ports")
+                            port_data = db.get_top_destination_ports(
+                                start_time=scope_start_ts if enable_time_filter else None,
+                                end_time=scope_end_ts if enable_time_filter else None,
+                                protocol=selected_protocol if selected_protocol != "All" else None,
+                            )
+                            port_chart = build_ranking_chart(
+                                port_data,
+                                category_field="dst_port",
+                                value_field="packet_count",
+                                category_title="Destination Port",
+                                value_title="Packet Count",
+                                bar_color=THEME_COLORS["primary_accent"],
+                            )
+                            if port_chart is not None:
+                                st.altair_chart(port_chart, width="stretch")
+
+                    st.divider()
+
+                    # Recent Security Alerts Table (Must be dataframe[0] for tests)
+                    st.subheader("Recent Security Alerts")
+                    if not filtered_alerts:
+                        st.info("No alerts match the selected filter criteria.")
+                    else:
+                        alert_rows = []
+                        for a in filtered_alerts:
+                            alert_rows.append({
+                                "Alert ID": a.get("id"),
+                                "Timestamp": format_timestamp(a.get("timestamp")),
+                                "Rule": a.get("rule_name", "UNKNOWN"),
+                                "Severity": a.get("severity", "UNKNOWN"),
+                                "Detection Method": a.get("detection_method", "HEURISTIC"),
+                                "Source IP": a.get("src_ip") or "N/A",
+                                "Destination IP": a.get("dst_ip") or "N/A",
+                                "Observed": round(float(a.get("observed_value", 0.0)), 2),
+                                "Threshold": round(float(a.get("threshold", 0.0)), 2),
+                                "Window (s)": round(float(a.get("window_seconds", 0.0)), 1),
+                                "Description / Reason": a.get("message", ""),
+                            })
+                        df_alerts = pd.DataFrame(alert_rows)
+                        st.dataframe(df_alerts, width="stretch")
+
+                    st.divider()
+
+                    # Alert Investigation Workflow (Must have selectbox[0] and dataframe[1] for tests)
+                    st.subheader("🔍 Alert Investigation")
+                    if not filtered_alerts:
+                        st.info("No alerts available to investigate with the current filter criteria.")
+                    else:
+                        alert_id_to_label = {
+                            a["id"]: (
+                                f"Alert #{a['id']} | {a.get('rule_name', 'UNKNOWN')} [{a.get('severity', 'UNKNOWN')}] | "
+                                f"{a.get('src_ip') or 'N/A'} -> {a.get('dst_ip') or 'N/A'} | "
+                                f"{format_timestamp(a.get('timestamp'))}"
+                            )
+                            for a in filtered_alerts
+                        }
+                        selected_alert_id = st.selectbox(
+                            "Select Alert to Investigate",
+                            options=list(alert_id_to_label.keys()),
+                            format_func=lambda aid: alert_id_to_label[aid],
+                            key="overview_alert_select",
+                        )
+                        selected_alert = db.get_alert_by_id(selected_alert_id)
+                        if selected_alert:
+                            st.markdown(f"#### Alert Details — ID #{selected_alert['id']}")
+                            c1, c2, c3, c4 = st.columns(4)
+                            c1.metric("Detection Rule", selected_alert.get("rule_name", "UNKNOWN"))
+                            c2.metric("Severity", selected_alert.get("severity", "UNKNOWN"))
+                            c3.metric("Observed / Threshold", f"{selected_alert.get('observed_value', 0):.2f} / {selected_alert.get('threshold', 0):.2f}")
+                            c4.metric("Window Duration", f"{selected_alert.get('window_seconds', 0):.1f} s")
+
+                            alert_ts = float(selected_alert.get("timestamp", 0.0))
+                            win_sec = float(selected_alert.get("window_seconds", 0.0))
+                            effective_start = alert_ts - win_sec
+                            effective_end = alert_ts
+
+                            evidence_packets = db.get_related_packets(
+                                src_ip=selected_alert.get("src_ip"),
+                                dst_ip=selected_alert.get("dst_ip"),
+                                start_time=effective_start,
+                                end_time=effective_end,
+                                limit=500,
+                                order="ASC",
+                            )
+
+                            st.markdown("#### Related Packet Evidence")
+                            if not evidence_packets:
+                                st.warning(
+                                    f"No matching packet records found for "
+                                    f"{selected_alert.get('src_ip') or 'any'} -> {selected_alert.get('dst_ip') or 'any'} "
+                                    f"within the detection interval `[{format_timestamp(effective_start)} — {format_timestamp(effective_end)}]`."
+                                )
+                            else:
+                                st.success(f"Found **{len(evidence_packets)}** related packet record(s) matching detection window.")
+                                evidence_rows = []
+                                for p in evidence_packets:
+                                    evidence_rows.append({
+                                        "Timestamp": format_timestamp(p.get("timestamp")),
+                                        "Epoch": f"{p.get('timestamp', 0.0):.6f}",
+                                        "Protocol": p.get("protocol", ""),
+                                        "Source IP": p.get("src_ip", ""),
+                                        "Destination IP": p.get("dst_ip", ""),
+                                        "Source Port": str(p["src_port"]) if p.get("src_port") is not None else "-",
+                                        "Destination Port": str(p["dst_port"]) if p.get("dst_port") is not None else "-",
+                                        "Length (Bytes)": p.get("length", 0),
+                                        "TCP Flags": p.get("tcp_flags") if p.get("tcp_flags") is not None else "-",
+                                    })
+                                df_evidence = pd.DataFrame(evidence_rows)
+                                st.dataframe(df_evidence, width="stretch")
+
+                    st.divider()
+
+                    # Recent Network Traffic Table (Must be dataframe[2] for tests)
+                    st.subheader("Recent Network Traffic")
+                    filtered_packets = raw_packets
+                    if selected_protocol != "All":
+                        filtered_packets = [
+                            p for p in filtered_packets
+                            if p.get("protocol", "").upper() == selected_protocol.upper()
+                        ]
+                    filtered_packets = filtered_packets[: int(packet_limit)]
+
+                    if not filtered_packets:
+                        st.info("No packets match the selected traffic filters.")
+                    else:
+                        packet_rows = []
+                        for p in filtered_packets:
+                            packet_rows.append({
+                                "Timestamp": format_timestamp(p.get("timestamp")),
+                                "Source IP": p.get("src_ip", ""),
+                                "Destination IP": p.get("dst_ip", ""),
+                                "Protocol": p.get("protocol", ""),
+                                "Length (Bytes)": p.get("length", 0),
+                                "Source Port": str(p["src_port"]) if p.get("src_port") is not None else "-",
+                                "Destination Port": str(p["dst_port"]) if p.get("dst_port") is not None else "-",
+                                "TCP Flags": p.get("tcp_flags") if p.get("tcp_flags") is not None else "-",
+                            })
+                        df_packets = pd.DataFrame(packet_rows)
+                        st.dataframe(df_packets, width="stretch")
 
             # ------------------------------------------------------------------
             # PAGE 2: LIVE MONITORING
@@ -1300,12 +1316,32 @@ def render_dashboard() -> None:
                 st.title("🖥️ System Diagnostics & Environment Status")
                 st.caption("Verify runtime dependencies, database health, and evaluation reports.")
 
-                import sys
                 s1, s2, s3 = st.columns(3)
                 s1.metric("Python Interpreter", sys.version.split(" ")[0])
                 s2.metric("Database Path", str(target_db_path.name))
                 file_size_kb = target_db_path.stat().st_size / 1024 if target_db_path.exists() else 0
                 s3.metric("Database Size", f"{file_size_kb:.1f} KB")
+
+                st.markdown("---")
+                st.subheader("📊 Stored Database Statistics")
+                sc1, sc2, sc3, sc4 = st.columns(4)
+                sc1.metric("Packets", f"{packet_count:,}")
+                sc2.metric("Alerts", f"{alert_count:,}")
+                sc3.metric("Indexed Flows", f"{db.get_flow_count():,}")
+                all_registered_models = db.get_models()
+                sc4.metric("Registered Models", f"{len(all_registered_models):,}")
+
+                st.markdown("---")
+                st.subheader("📦 Environment & Engine Status")
+                e1, e2, e3, e4 = st.columns(4)
+                e1.metric("SQLite Engine", sqlite3.sqlite_version)
+                e2.metric("Streamlit Version", st.__version__)
+                e3.metric("Scikit-Learn", sklearn.__version__)
+                try:
+                    import scapy
+                    e4.metric("Scapy Engine", scapy.__version__)
+                except Exception:
+                    e4.metric("Scapy Engine", "Unavailable")
 
                 st.markdown("---")
                 st.markdown("### 📄 Evaluation Reports Browser")
