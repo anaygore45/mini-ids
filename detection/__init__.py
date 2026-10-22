@@ -39,6 +39,8 @@ class Alert:
     model_version: Optional[str] = None
     confidence: Optional[float] = None
     anomaly_score: Optional[float] = None
+    threat_score: Optional[float] = None
+    prevention_action_id: Optional[str] = None
 
     def to_dict(self) -> dict:
         """Convert the alert instance to a standard Python dictionary."""

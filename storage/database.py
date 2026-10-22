@@ -79,6 +79,61 @@ class DatabaseManager:
                     conn.execute("ALTER TABLE alerts ADD COLUMN confidence REAL;")
                 if "anomaly_score" not in alert_cols:
                     conn.execute("ALTER TABLE alerts ADD COLUMN anomaly_score REAL;")
+
+            # Ensure prevention and audit tables exist
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS prevention_actions (
+                    action_id TEXT PRIMARY KEY,
+                    alert_id TEXT,
+                    timestamp REAL NOT NULL,
+                    target_ip TEXT NOT NULL,
+                    target_port INTEGER,
+                    protocol TEXT,
+                    action_type TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    threat_score REAL NOT NULL,
+                    risk_level TEXT NOT NULL,
+                    rule_name TEXT NOT NULL,
+                    duration_seconds INTEGER NOT NULL DEFAULT 300,
+                    expires_at REAL,
+                    approved_by TEXT,
+                    executed_at REAL,
+                    verified_at REAL,
+                    rolled_back_at REAL,
+                    details_json TEXT,
+                    error_message TEXT
+                );
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS approval_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    action_id TEXT NOT NULL,
+                    timestamp REAL NOT NULL,
+                    operator TEXT NOT NULL,
+                    decision TEXT NOT NULL,
+                    reason TEXT,
+                    details_json TEXT
+                );
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp REAL NOT NULL,
+                    actor TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    target TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    result TEXT NOT NULL,
+                    details_json TEXT
+                );
+                """
+            )
         except Exception as e:
             logger.debug("Migration check skipped: %s", e)
 
@@ -245,6 +300,119 @@ class DatabaseManager:
                 """
                 CREATE INDEX IF NOT EXISTS idx_flows_src_dst
                 ON flows(src_ip, dst_ip);
+                """
+            )
+
+            # 6. Prevention Actions Table
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS prevention_actions (
+                    action_id TEXT PRIMARY KEY,
+                    alert_id TEXT,
+                    timestamp REAL NOT NULL,
+                    target_ip TEXT NOT NULL,
+                    target_port INTEGER,
+                    protocol TEXT,
+                    action_type TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    threat_score REAL NOT NULL,
+                    risk_level TEXT NOT NULL,
+                    rule_name TEXT NOT NULL,
+                    duration_seconds INTEGER NOT NULL DEFAULT 300,
+                    expires_at REAL,
+                    approved_by TEXT,
+                    executed_at REAL,
+                    verified_at REAL,
+                    rolled_back_at REAL,
+                    details_json TEXT,
+                    error_message TEXT
+                );
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_prevention_time
+                ON prevention_actions(timestamp);
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_prevention_target
+                ON prevention_actions(target_ip);
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_prevention_status
+                ON prevention_actions(status);
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_prevention_mode
+                ON prevention_actions(mode);
+                """
+            )
+
+            # 7. Approval Events Table
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS approval_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    action_id TEXT NOT NULL,
+                    timestamp REAL NOT NULL,
+                    operator TEXT NOT NULL,
+                    decision TEXT NOT NULL,
+                    reason TEXT,
+                    details_json TEXT
+                );
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_approval_action_id
+                ON approval_events(action_id);
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_approval_timestamp
+                ON approval_events(timestamp);
+                """
+            )
+
+            # 8. Audit Log Table
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp REAL NOT NULL,
+                    actor TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    target TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    result TEXT NOT NULL,
+                    details_json TEXT
+                );
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_audit_time
+                ON audit_log(timestamp);
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_audit_actor
+                ON audit_log(actor);
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_audit_action
+                ON audit_log(action);
                 """
             )
 
@@ -1369,6 +1537,284 @@ class DatabaseManager:
         conn = self.get_connection()
         cursor = conn.execute("SELECT COUNT(*) FROM flows;")
         return cursor.fetchone()[0]
+
+    # --------------------------------------------------------------------------
+    # Prevention Actions, Approval Workflow & Audit Log Persistence
+    # --------------------------------------------------------------------------
+
+    def insert_prevention_action(self, action: Dict[str, Any]) -> str:
+        """Insert a newly recommended, approved, or executed prevention action."""
+        import json
+        import time
+        import uuid
+        conn = self.get_connection()
+        action_id = str(action.get("action_id") or f"act_{uuid.uuid4().hex[:12]}")
+        details_val = action.get("details_json") or action.get("details", {})
+        if isinstance(details_val, (dict, list)):
+            details_json = json.dumps(details_val)
+        else:
+            details_json = str(details_val)
+
+        query = """
+            INSERT INTO prevention_actions (
+                action_id, alert_id, timestamp, target_ip, target_port, protocol,
+                action_type, mode, status, threat_score, risk_level, rule_name,
+                duration_seconds, expires_at, approved_by, executed_at, verified_at,
+                rolled_back_at, details_json, error_message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """
+        with conn:
+            conn.execute(
+                query,
+                (
+                    action_id,
+                    action.get("alert_id"),
+                    float(action.get("timestamp", time.time())),
+                    str(action.get("target_ip", "")),
+                    action.get("target_port"),
+                    action.get("protocol"),
+                    str(action.get("action_type", "BLOCK_IP")),
+                    str(action.get("mode", "SIMULATION")),
+                    str(action.get("status", "RECOMMENDED")),
+                    float(action.get("threat_score", 0.0)),
+                    str(action.get("risk_level", "LOW")),
+                    str(action.get("rule_name", "UNKNOWN")),
+                    int(action.get("duration_seconds", 300)),
+                    action.get("expires_at"),
+                    action.get("approved_by"),
+                    action.get("executed_at"),
+                    action.get("verified_at"),
+                    action.get("rolled_back_at"),
+                    details_json,
+                    action.get("error_message"),
+                ),
+            )
+        return action_id
+
+    def update_prevention_action_status(
+        self,
+        action_id: str,
+        status: str,
+        details: Optional[Dict[str, Any]] = None,
+        executed_at: Optional[float] = None,
+        verified_at: Optional[float] = None,
+        rolled_back_at: Optional[float] = None,
+        error_message: Optional[str] = None,
+        approved_by: Optional[str] = None,
+    ) -> bool:
+        """Update lifecycle status and execution timestamps for a prevention action."""
+        import json
+        conn = self.get_connection()
+        fields = ["status = ?"]
+        params: List[Any] = [str(status)]
+
+        if details is not None:
+            fields.append("details_json = ?")
+            params.append(json.dumps(details) if isinstance(details, (dict, list)) else str(details))
+        if executed_at is not None:
+            fields.append("executed_at = ?")
+            params.append(float(executed_at))
+        if verified_at is not None:
+            fields.append("verified_at = ?")
+            params.append(float(verified_at))
+        if rolled_back_at is not None:
+            fields.append("rolled_back_at = ?")
+            params.append(float(rolled_back_at))
+        if error_message is not None:
+            fields.append("error_message = ?")
+            params.append(str(error_message))
+        if approved_by is not None:
+            fields.append("approved_by = ?")
+            params.append(str(approved_by))
+
+        params.append(str(action_id))
+        query = f"UPDATE prevention_actions SET {', '.join(fields)} WHERE action_id = ?;"
+        with conn:
+            cursor = conn.execute(query, tuple(params))
+            return cursor.rowcount > 0
+
+    def get_prevention_actions(
+        self,
+        limit: Optional[int] = 100,
+        offset: int = 0,
+        mode: Optional[str] = None,
+        status: Optional[str] = None,
+        target_ip: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Query prevention actions with optional mode, status, and IP filters."""
+        import json
+        conn = self.get_connection()
+        clauses = []
+        params: List[Any] = []
+        if mode:
+            clauses.append("mode = ?")
+            params.append(str(mode))
+        if status:
+            clauses.append("status = ?")
+            params.append(str(status))
+        if target_ip:
+            clauses.append("target_ip = ?")
+            params.append(str(target_ip))
+
+        where_str = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        if limit is not None:
+            query = f"SELECT * FROM prevention_actions {where_str} ORDER BY timestamp DESC LIMIT ? OFFSET ?;"
+            params.extend([int(limit), int(offset)])
+        else:
+            query = f"SELECT * FROM prevention_actions {where_str} ORDER BY timestamp DESC;"
+
+        cursor = conn.execute(query, tuple(params))
+        rows = []
+        for r in cursor.fetchall():
+            d = dict(r)
+            try:
+                d["details"] = json.loads(d.get("details_json") or "{}")
+            except Exception:
+                d["details"] = {}
+            rows.append(d)
+        return rows
+
+    def get_prevention_action(self, action_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve a single prevention action by ID."""
+        import json
+        conn = self.get_connection()
+        cursor = conn.execute("SELECT * FROM prevention_actions WHERE action_id = ?;", (str(action_id),))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            d["details"] = json.loads(d.get("details_json") or "{}")
+        except Exception:
+            d["details"] = {}
+        return d
+
+    def insert_approval_event(
+        self,
+        action_id: str,
+        operator: str,
+        decision: str,
+        reason: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        """Record a human operator approval or rejection decision."""
+        import json
+        import time
+        conn = self.get_connection()
+        details_json = json.dumps(details or {})
+        query = """
+            INSERT INTO approval_events (action_id, timestamp, operator, decision, reason, details_json)
+            VALUES (?, ?, ?, ?, ?, ?);
+        """
+        with conn:
+            cursor = conn.execute(query, (str(action_id), time.time(), str(operator), str(decision), reason, details_json))
+            return cursor.lastrowid
+
+    def get_approval_events(self, action_id: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+        """Retrieve recorded operator approval decisions."""
+        import json
+        conn = self.get_connection()
+        if action_id:
+            cursor = conn.execute("SELECT * FROM approval_events WHERE action_id = ? ORDER BY timestamp DESC LIMIT ?;", (str(action_id), int(limit)))
+        else:
+            cursor = conn.execute("SELECT * FROM approval_events ORDER BY timestamp DESC LIMIT ?;", (int(limit),))
+        rows = []
+        for r in cursor.fetchall():
+            d = dict(r)
+            try:
+                d["details"] = json.loads(d.get("details_json") or "{}")
+            except Exception:
+                d["details"] = {}
+            rows.append(d)
+        return rows
+
+    def insert_audit_event(
+        self,
+        actor: str,
+        action: str,
+        target: str,
+        mode: str,
+        result: str,
+        details: Optional[Dict[str, Any]] = None,
+        timestamp: Optional[float] = None,
+    ) -> int:
+        """Insert an immutable record into the audit log."""
+        import json
+        import time
+        conn = self.get_connection()
+        ts = float(timestamp if timestamp is not None else time.time())
+        details_json = json.dumps(details or {})
+        query = """
+            INSERT INTO audit_log (timestamp, actor, action, target, mode, result, details_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?);
+        """
+        with conn:
+            cursor = conn.execute(query, (ts, str(actor), str(action), str(target), str(mode), str(result), details_json))
+            return cursor.lastrowid
+
+    def get_audit_logs(
+        self,
+        limit: Optional[int] = 100,
+        offset: int = 0,
+        actor: Optional[str] = None,
+        action: Optional[str] = None,
+        mode: Optional[str] = None,
+        result: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Query immutable audit log entries with flexible filtering."""
+        import json
+        conn = self.get_connection()
+        clauses = []
+        params: List[Any] = []
+        if actor:
+            clauses.append("actor = ?")
+            params.append(str(actor))
+        if action:
+            clauses.append("action = ?")
+            params.append(str(action))
+        if mode:
+            clauses.append("mode = ?")
+            params.append(str(mode))
+        if result:
+            clauses.append("result = ?")
+            params.append(str(result))
+
+        where_str = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        if limit is not None:
+            query = f"SELECT * FROM audit_log {where_str} ORDER BY timestamp DESC LIMIT ? OFFSET ?;"
+            params.extend([int(limit), int(offset)])
+        else:
+            query = f"SELECT * FROM audit_log {where_str} ORDER BY timestamp DESC;"
+
+        cursor = conn.execute(query, tuple(params))
+        rows = []
+        for r in cursor.fetchall():
+            d = dict(r)
+            try:
+                d["details"] = json.loads(d.get("details_json") or "{}")
+            except Exception:
+                d["details"] = {}
+            rows.append(d)
+        return rows
+
+    def get_prevention_stats(self) -> Dict[str, Any]:
+        """Aggregate prevention and audit KPIs."""
+        conn = self.get_connection()
+        total_actions = conn.execute("SELECT COUNT(*) FROM prevention_actions;").fetchone()[0]
+        active_rules = conn.execute("SELECT COUNT(*) FROM prevention_actions WHERE status IN ('ACTIVE', 'VERIFIED');").fetchone()[0]
+        pending_approvals = conn.execute("SELECT COUNT(*) FROM prevention_actions WHERE status = 'AWAITING_APPROVAL';").fetchone()[0]
+        simulated_count = conn.execute("SELECT COUNT(*) FROM prevention_actions WHERE mode = 'SIMULATION';").fetchone()[0]
+        enforced_count = conn.execute("SELECT COUNT(*) FROM prevention_actions WHERE mode = 'AUTHORIZED_ENFORCEMENT';").fetchone()[0]
+        total_audit_events = conn.execute("SELECT COUNT(*) FROM audit_log;").fetchone()[0]
+
+        return {
+            "total_prevention_actions": total_actions,
+            "active_rules": active_rules,
+            "pending_approvals": pending_approvals,
+            "simulated_actions": simulated_count,
+            "enforced_actions": enforced_count,
+            "total_audit_events": total_audit_events,
+        }
 
     def close(self) -> None:
         """Safely close the SQLite database connection if open."""

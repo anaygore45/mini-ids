@@ -32,6 +32,17 @@ from ml.model_registry import ModelRegistry
 from ml.preprocessing import FlowDataPreprocessor
 from ml.train_anomaly import AnomalyDetectorTrainer
 from ml.train_supervised import SupervisedModelTrainer
+from prevention import (
+    ActionStatus,
+    ActionType,
+    PolicyEngine,
+    PreventionAction,
+    PreventionEngine,
+    PreventionMode,
+    RiskLevel,
+    SimulationAdapter,
+    WindowsFirewallAdapter,
+)
 from storage.database import DEFAULT_DB_PATH, DatabaseManager
 from storage.demo_data import DEFAULT_DEMO_DB_PATH, get_or_create_demo_database
 
@@ -307,6 +318,232 @@ def render_live_capture_section(target_db_path: Path, is_demo_mode: bool = False
                 st.rerun()
 
 
+def render_prevention_center(db: DatabaseManager, is_demo_mode: bool = False) -> None:
+    """Render the Intrusion Prevention Center workspace."""
+    st.title("🛡️ Intrusion Prevention Center (IDPS)")
+    st.caption("Active host and network protection, manual operator approval workflows, verified firewall rules, and self-lockout safeguards.")
+
+    # Manage session prevention mode
+    if "prevention_mode" not in st.session_state:
+        st.session_state["prevention_mode"] = PreventionMode.SIMULATION.value
+
+    current_mode_val = st.session_state["prevention_mode"]
+    current_mode = PreventionMode(current_mode_val)
+    engine = PreventionEngine(db_manager=db, initial_mode=current_mode)
+
+    # 1. Prevention Mode Switcher & Operational Posture
+    st.markdown("### 🎛️ Prevention Operational Posture")
+    mode_options = [
+        PreventionMode.SIMULATION.value,
+        PreventionMode.MANUAL_APPROVAL.value,
+        PreventionMode.AUTHORIZED_ENFORCEMENT.value,
+    ]
+    mode_labels = {
+        PreventionMode.SIMULATION.value: "🟢 Mode A: Simulation (Zero OS modifications, Safe Default)",
+        PreventionMode.MANUAL_APPROVAL.value: "🟡 Mode B: Manual Approval (Operator Queue & Human-in-the-Loop)",
+        PreventionMode.AUTHORIZED_ENFORCEMENT.value: "🔴 Mode C: Authorized Enforcement (Host Firewall Rules)",
+    }
+
+    col_m1, col_m2 = st.columns([3, 1])
+    with col_m1:
+        new_mode_selection = st.radio(
+            "Select Prevention Execution Mode:",
+            options=mode_options,
+            format_func=lambda m: mode_labels[m],
+            index=mode_options.index(current_mode_val),
+            horizontal=False,
+            key="prevention_mode_radio",
+        )
+        if new_mode_selection != current_mode_val:
+            st.session_state["prevention_mode"] = new_mode_selection
+            engine.set_mode(PreventionMode(new_mode_selection))
+            st.rerun()
+
+    with col_m2:
+        adapter = engine.get_active_adapter()
+        avail, reason = adapter.is_available()
+        st.markdown("**Active Driver:**")
+        if avail:
+            st.success(f"**{adapter.__class__.__name__}**\n\n{reason}")
+        else:
+            st.warning(f"**{adapter.__class__.__name__}**\n\n{reason}")
+
+    # Mode Context Banner
+    if current_mode == PreventionMode.SIMULATION:
+        st.info(
+            "ℹ️ **Simulation Mode Active:** Detections generate response recommendations and simulated firewall entries. "
+            "Host firewall tables are **never** altered. Safe for demonstrations, student evaluations, and non-admin systems."
+        )
+    elif current_mode == PreventionMode.MANUAL_APPROVAL:
+        st.warning(
+            "⚠️ **Manual Approval Mode Active:** High-risk threats enter the pending approval queue. An authorized security operator "
+            "must explicitly review and click 'Approve & Block' before any prevention rule is enacted."
+        )
+    elif current_mode == PreventionMode.AUTHORIZED_ENFORCEMENT:
+        st.error(
+            "🚨 **Authorized Enforcement Mode Active:** Validated threats exceeding the 0.70 threat score threshold trigger automated "
+            "inbound blocking rules on the host firewall. Rules are scoped strictly to `MiniIDS_Block_*`."
+        )
+
+    # 2. Prevention Metrics KPIs
+    stats = db.get_prevention_stats()
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Active Blocks", f"{stats['active_rules']:,}")
+    k2.metric("Pending Approvals", f"{stats['pending_approvals']:,}")
+    k3.metric("Simulated Actions", f"{stats['simulated_actions']:,}")
+    k4.metric("Enforced Actions", f"{stats['enforced_actions']:,}")
+    k5.metric("Audit Events", f"{stats['total_audit_events']:,}")
+
+    st.markdown("---")
+
+    # 3. Pending Approvals Queue
+    st.markdown("### 📋 Pending Approval Queue (Human-in-the-Loop)")
+    pending_queue = engine.approval_manager.get_pending_queue()
+    if not pending_queue:
+        st.success("✅ No pending approval requests in queue. All detection policies are current.")
+    else:
+        st.caption(f"{len(pending_queue)} item(s) awaiting security operator review.")
+        for item in pending_queue:
+            with st.container(border=True):
+                c_info, c_action = st.columns([3, 1])
+                with c_info:
+                    st.markdown(
+                        f"**Target IP:** `{item['target_ip']}` | "
+                        f"**Rule:** `{item['rule_name']}` | "
+                        f"**Threat Score:** `{item['threat_score']:.2f}` ({item['risk_level']}) | "
+                        f"**Time:** {format_timestamp(item['timestamp'])}"
+                    )
+                    details = item.get("details", {})
+                    reason = details.get("reason", "Threshold exceeded")
+                    st.caption(f"**Rationale:** {reason} | Protocol: {item.get('protocol') or 'ANY'} | Port: {item.get('target_port') or 'ALL'}")
+                with c_action:
+                    col_b1, col_b2 = st.columns(2)
+                    with col_b1:
+                        if st.button("Approve", key=f"app_{item['action_id']}", type="primary"):
+                            engine.approve_and_execute(item["action_id"], operator="SOC_Operator")
+                            st.toast(f"Approved block for {item['target_ip']}")
+                            st.rerun()
+                    with col_b2:
+                        if st.button("Reject", key=f"rej_{item['action_id']}"):
+                            engine.reject(item["action_id"], operator="SOC_Operator", reason="Operator dismissed")
+                            st.toast(f"Rejected recommendation for {item['target_ip']}")
+                            st.rerun()
+
+    st.markdown("---")
+
+    # 4. Active Prevention Rules Table
+    st.markdown("### 🧱 Active Prevention Rules & Unblock Controls")
+    active_actions = db.get_prevention_actions(limit=100)
+    if not active_actions:
+        st.info("No prevention actions currently recorded in the database.")
+    else:
+        table_rows = []
+        for a in active_actions:
+            table_rows.append({
+                "Action ID": a["action_id"],
+                "Target IP": a["target_ip"],
+                "Action": a["action_type"],
+                "Mode": a["mode"],
+                "Status": a["status"],
+                "Threat Score": f"{a['threat_score']:.2f}",
+                "Risk": a["risk_level"],
+                "Trigger Rule": a["rule_name"],
+                "Timestamp": format_timestamp(a["timestamp"]),
+                "Expires": format_timestamp(a.get("expires_at")),
+            })
+        st.dataframe(pd.DataFrame(table_rows), width="stretch")
+
+        active_block_ids = [a["action_id"] for a in active_actions if a["status"] in ["ACTIVE", "VERIFIED"]]
+        if active_block_ids:
+            with st.expander("🔓 Manual Rule Rollback & Unblock", expanded=False):
+                col_sel, col_unb = st.columns([3, 1])
+                with col_sel:
+                    selected_unblock_id = st.selectbox("Select Action to Roll Back:", options=active_block_ids)
+                with col_unb:
+                    st.write("")
+                    st.write("")
+                    if st.button("Unblock Rule", type="secondary"):
+                        ok, msg = engine.unblock(selected_unblock_id, operator="SOC_Operator")
+                        if ok:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+
+    st.markdown("---")
+
+    # 5. Security Safeguards & Allowlist Panel
+    with st.expander("🛡️ Security Safeguards & Protected Allowlists", expanded=False):
+        st.markdown(
+            "**Self-Lockout Prevention:** The Mini-IDS policy engine strictly verifies that the following IP categories "
+            "can never be blocked, regardless of threat scores or simulated alerts:\n\n"
+            "- **Loopback:** `127.0.0.1`, `::1`, `localhost`\n"
+            "- **Network Infrastructure:** `0.0.0.0`, `255.255.255.255`\n"
+            "- **Core DNS Resolvers:** `8.8.8.8`, `8.8.4.4`, `1.1.1.1`, `1.0.0.1`, `9.9.9.9`\n"
+            "- **Configured Subnets:** Local gateway and designated operator addresses\n\n"
+            "**Offline Traffic Containment:** All uploaded PCAP captures and synthetic demonstration datasets are strictly "
+            "prohibited from triggering host firewall modifications. They run exclusively in Simulation mode."
+        )
+        if st.button("Emergency Flush All Active Rules"):
+            count = engine.shutdown()
+            st.success(f"Flushed and rolled back {count} active prevention rules.")
+            st.rerun()
+
+
+def render_audit_log_page(db: DatabaseManager) -> None:
+    """Render the Immutable Security and Prevention Audit Log."""
+    st.title("📜 Security & Prevention Audit Log")
+    st.caption("Immutable forensic audit trail of all security decisions, policy evaluations, approval workflows, and firewall state changes.")
+
+    f_col1, f_col2, f_col3, f_col4 = st.columns(4)
+    with f_col1:
+        actor_filter = st.selectbox("Filter by Actor:", options=["ALL", "POLICY_ENGINE", "SIMULATION_ENGINE", "ENFORCEMENT_ENGINE", "VERIFICATION_ENGINE", "SYSTEM_OPERATOR", "EXPIRATION_MONITOR"])
+    with f_col2:
+        action_filter = st.selectbox("Filter by Action:", options=["ALL", "POLICY_EVALUATION", "SIMULATE_BLOCK", "ENFORCE_BLOCK", "VERIFY_RULE", "MANUAL_APPROVE", "MANUAL_REJECT", "MANUAL_UNBLOCK", "CHANGE_PREVENTION_MODE"])
+    with f_col3:
+        mode_filter = st.selectbox("Filter by Mode:", options=["ALL", "SIMULATION", "MANUAL_APPROVAL", "AUTHORIZED_ENFORCEMENT"])
+    with f_col4:
+        result_filter = st.selectbox("Filter by Result:", options=["ALL", "SUCCESS", "FAILURE", "REJECTED"])
+
+    actor_val = None if actor_filter == "ALL" else actor_filter
+    action_val = None if action_filter == "ALL" else action_filter
+    mode_val = None if mode_filter == "ALL" else mode_filter
+    result_val = None if result_filter == "ALL" else result_filter
+
+    audit_records = db.get_audit_logs(
+        limit=200,
+        actor=actor_val,
+        action=action_val,
+        mode=mode_val,
+        result=result_val,
+    )
+
+    if not audit_records:
+        st.info("No audit log events found matching the specified filters.")
+        return
+
+    st.markdown(f"**Showing {len(audit_records)} audit event(s):**")
+    table_data = []
+    for r in audit_records:
+        table_data.append({
+            "Log ID": r["log_id"],
+            "Timestamp (UTC)": format_timestamp(r["timestamp"]),
+            "Actor": r["actor"],
+            "Action": r["action"],
+            "Target": r["target"],
+            "Mode": r["mode"],
+            "Result": r["result"],
+        })
+    st.dataframe(pd.DataFrame(table_data), width="stretch")
+
+    with st.expander("🔍 Deep Forensic Inspection (JSON Payload)", expanded=False):
+        log_ids = [r["log_id"] for r in audit_records]
+        selected_log_id = st.selectbox("Select Log ID to inspect:", options=log_ids)
+        selected_record = next((r for r in audit_records if r["log_id"] == selected_log_id), None)
+        if selected_record:
+            st.json(selected_record)
+
+
 def render_dashboard() -> None:
     """Main Streamlit application entrypoint."""
     st.set_page_config(
@@ -353,10 +590,12 @@ def render_dashboard() -> None:
         key="app_demo_toggle",
     )
 
-    # 9-Section Navigation Radio (Sidebar Radio [0])
+    # Navigation Sections (Sidebar Radio [0])
     nav_sections = [
         "Overview",
         "Live Monitoring",
+        "Prevention Center",
+        "Audit Log",
         "Alert Investigation",
         "Traffic Intelligence",
         "AI/ML Detection",
@@ -856,6 +1095,18 @@ def render_dashboard() -> None:
                     st.info("No security alerts triggered during current live capture session.")
                 else:
                     st.dataframe(pd.DataFrame(recent_live_alerts), width="stretch")
+
+            # ------------------------------------------------------------------
+            # PAGE 3: PREVENTION CENTER (IDPS Prevention & Governance)
+            # ------------------------------------------------------------------
+            elif selected_page == "Prevention Center":
+                render_prevention_center(db, is_demo_mode=is_demo_mode)
+
+            # ------------------------------------------------------------------
+            # PAGE 4: AUDIT LOG (Immutable Event Forensics)
+            # ------------------------------------------------------------------
+            elif selected_page == "Audit Log":
+                render_audit_log_page(db)
 
             # ------------------------------------------------------------------
             # PAGE 3: ALERT INVESTIGATION (Dedicated Forensic Workspace)

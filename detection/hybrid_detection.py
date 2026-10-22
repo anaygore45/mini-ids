@@ -43,6 +43,8 @@ class HybridDetectionEngine:
         enable_heuristic: bool = True,
         enable_supervised: bool = True,
         enable_anomaly: bool = True,
+        prevention_engine: Optional[Any] = None,
+        source_tag: str = "live",
     ) -> None:
         # 1. Heuristic Detectors
         self.enable_heuristic = enable_heuristic
@@ -66,6 +68,46 @@ class HybridDetectionEngine:
         self.anomaly_preprocessor = anomaly_preprocessor
         self.anomaly_meta = anomaly_meta or {}
 
+        # 5. Prevention Engine & Source Provenance
+        self.prevention_engine = prevention_engine
+        self.source_tag = source_tag
+
+    def _correlate_and_prevent(
+        self,
+        alert: Alert,
+        packet: Optional[NormalizedPacket] = None,
+        flow: Optional["NetworkFlow"] = None,
+    ) -> Alert:
+        """Evaluate prevention policy and threat scoring for an alert."""
+        if self.prevention_engine is None:
+            return alert
+
+        try:
+            target_ip = alert.src_ip or (flow.src_ip if flow else (packet.src_ip if packet else ""))
+            dst_ip = alert.dst_ip or (flow.dst_ip if flow else (packet.dst_ip if packet else None))
+            target_port = flow.dst_port if flow else (packet.dst_port if packet else None)
+            protocol = flow.protocol if flow else (packet.protocol if packet else "TCP")
+
+            action = self.prevention_engine.process_threat(
+                src_ip=target_ip,
+                rule_name=alert.rule_name,
+                alert_id=str(getattr(alert, "id", "")),
+                dst_ip=dst_ip,
+                target_port=target_port,
+                protocol=protocol,
+                heuristic_severity=alert.severity,
+                ml_confidence=alert.confidence,
+                anomaly_score=alert.anomaly_score,
+                predicted_class=alert.rule_name.replace("ML_SUPERVISED_", ""),
+                source_tag=self.source_tag,
+            )
+            alert.threat_score = action.threat_score
+            alert.prevention_action_id = action.action_id
+        except Exception as p_err:
+            logger.debug("Prevention engine processing error: %s", p_err)
+
+        return alert
+
     def process_packet(self, packet: NormalizedPacket) -> Optional[Alert]:
         """Process a single packet and return the first alert if triggered (standard detector interface)."""
         alerts, _ = self.process_packet_all(packet)
@@ -88,13 +130,16 @@ class HybridDetectionEngine:
                 if alert is not None:
                     # Tag with HEURISTIC detection method
                     alert.detection_method = "HEURISTIC"
+                    alert = self._correlate_and_prevent(alert, packet=packet)
                     alerts.append(alert)
 
         # 2. Flow Aggregation & ML Detection
         completed_flows = self.flow_extractor.process_packet(packet)
         for flow in completed_flows:
             ml_alerts = self._evaluate_flow_ml(flow)
-            alerts.extend(ml_alerts)
+            for ma in ml_alerts:
+                ma = self._correlate_and_prevent(ma, flow=flow)
+                alerts.append(ma)
 
         return alerts, completed_flows
 
@@ -104,7 +149,9 @@ class HybridDetectionEngine:
         alerts: List[Alert] = []
         for flow in remaining_flows:
             ml_alerts = self._evaluate_flow_ml(flow)
-            alerts.extend(ml_alerts)
+            for ma in ml_alerts:
+                ma = self._correlate_and_prevent(ma, flow=flow)
+                alerts.append(ma)
         return alerts, remaining_flows
 
     def _evaluate_flow_ml(self, flow: "NetworkFlow") -> List[Alert]:
