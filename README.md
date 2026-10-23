@@ -2,8 +2,9 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20x64%20%7C%20Linux-lightgrey.svg)](https://www.microsoft.com/windows)
-[![Tests](https://img.shields.io/badge/Tests-143%20Passed-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-162%20Passed-brightgreen.svg)](tests/)
 [![Architecture](https://img.shields.io/badge/IDPS-Hybrid%20Detection%20%2B%20Multi--Mode%20Prevention-orange.svg)](docs/architecture.md)
+[![Datasets](https://img.shields.io/badge/Datasets-CICIDS2017%20%7C%20UNSW--NB15%20%7C%20CICIDS2018-blueviolet.svg)](reports/dataset_report.json)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 An integrated, machine-learning-assisted **Intrusion Detection and Prevention System (IDPS)** and Exploratory Security Analytics Platform built with Python, Scapy, scikit-learn, SQLite, and Streamlit.
@@ -192,56 +193,83 @@ python main.py --interface "Wi-Fi" --count 500 --timeout 30 --hybrid
 
 ---
 
-## 6. Machine Learning Lifecycle & Training Pipeline
+## 6. Multi-Dataset AI Training & Generalization Pipeline
 
-Mini-IDS provides a fully reproducible training and evaluation pipeline backed by genuine public datasets:
+Mini-IDS implements a reproducible, multi-dataset machine learning and cross-dataset evaluation architecture across three public benchmark corpora:
+1. **Dataset A: CIC-IDS2017** (Supervised binary & multiclass flow telemetry)
+2. **Dataset B: UNSW-NB15** (Disparate modern topology, high-dimensional packet statistics)
+3. **Dataset C: CSE-CIC-IDS2018** (Collaborative AWS Open Data network attack flows)
 
+### 6.1 Two Experimental Methodologies
+- **Experiment A (Dataset-Specific Baselines):** Native high-dimensional models trained on verified feature schemas for each individual dataset.
+- **Experiment B (Unified Cross-Dataset Core):** Harmonized 11-feature common semantic core (`flow_duration_sec`, `fwd_packets`, `bwd_packets`, `fwd_bytes`, `bwd_bytes`, `total_packets`, `total_bytes`, `packet_rate`, `byte_rate`, `fwd_pkt_len_mean`, `bwd_pkt_len_mean`) with standardized binary and multiclass taxonomies.
+
+### 6.2 Executable Pipeline Commands
 ```powershell
-# 1. Programmatically acquire and sample CIC-IDS2017 Parquet datasets from Hugging Face
-python training/download_dataset.py
+# 1. Acquire and verify all three benchmark datasets
+python -m training.download_datasets --dataset all
 
-# 2. Prepare, harmonize to 28 canonical features, and create leakage-free splits
-python training/prepare_data.py --task-type multiclass
-python training/prepare_data.py --task-type binary
+# 2. Audit schema health, verify SHA256 checksums, and check data leakage
+python -m training.validate_datasets --dataset all
 
-# 3. Train Random Forest, Logistic Regression, and Isolation Forest models
-python training/train_models.py --task-type multiclass
-python training/train_models.py --task-type binary
+# 3. Prepare zero-leakage partitions (fit RobustScaler & imputers strictly on X_train)
+python -m training.prepare_datasets --dataset all
 
-# 4. Rigorously evaluate models on held-out test partitions and generate JSON metrics
-python training/evaluate_models.py --task-type multiclass
-python training/evaluate_models.py --task-type binary
+# 4. Train 5 ML estimators (RF, ET, Logistic Reg, HistGradientBoosting, Isolation Forest)
+python -m training.train_models --dataset all --task both
+
+# 5. Evaluate models on held-out test sets across Acc, Bal Acc, F1, and False Alarm Rates
+python -m training.evaluate_models --dataset all --task both
+
+# 6. Benchmark cross-dataset transferability and domain shift across all source permutations
+python -m training.cross_dataset_evaluation
+
+# 7. Compile consolidated reports and artifact metadata
+python -m training.generate_report
 ```
 
-### 6.1 Executable Jupyter Notebook
-For interactive data science evaluation and thesis documentation, run the end-to-end notebook:
+### 6.3 Executable 20-Step Jupyter Notebook
+For interactive thesis defense, research walkthroughs, and visual verification:
 ```powershell
-jupyter notebook notebooks/mini_ids_model_training.ipynb
+jupyter notebook notebooks/multi_dataset_training.ipynb
 ```
-The notebook walks through:
-- Ingestion and checksum verification of CIC-IDS2017 flows.
-- Exploratory Data Analysis (EDA) and class distributions.
-- Handling of infinite/NaN values and leakage column exclusion (`src_ip`, `dst_ip`, `timestamp`).
-- Preprocessor fitting strictly on `X_train`.
-- Model training and hyperparameter selection.
-- Metric tables, confusion matrices, and ROC-AUC curves.
-- Artifact export and real-time inference testing.
+The notebook executes:
+1. Dataset Download & Verification
+2. Dataset Inspection
+3. Data Cleaning
+4. Feature and Label Analysis
+5. Class Distribution Visualization
+6. Feature-Schema Reconciliation
+7. Data Leakage Checks
+8. Binary Label Standardization
+9. Multiclass Label Mapping
+10. Training/Validation/Test Partitioning
+11. Model Training
+12. Hyperparameter Selection
+13. Evaluation
+14. Cross-Dataset Testing
+15. Confusion Matrix Visualization
+16. Model Comparison
+17. Feature Importance
+18. Model Saving and Reloading
+19. Example Inference on Unseen Records
+20. Final Report Generation
 
 ---
 
 ## 7. Running the Automated Test Suite
 
-Mini-IDS includes **143 automated unit, integration, boundary, and headless Streamlit UI tests** with 100% pass rate:
+Mini-IDS includes **162 automated unit, integration, boundary, model, and UI tests** with 100% pass rate:
 
 ```powershell
-# Run the full test suite
+# Run the complete test suite
 python -m pytest
 
 # Run with concise summary
 python -m pytest -q
 
-# Run specific prevention and training suites
-python -m pytest tests/test_prevention.py tests/test_training_cli.py tests/test_hybrid.py
+# Run multi-dataset and prevention suites specifically
+python -m pytest tests/test_data_validation.py tests/test_preprocessing.py tests/test_models.py tests/test_cross_dataset.py tests/test_inference.py tests/test_integration.py tests/test_prevention.py
 ```
 
 ---

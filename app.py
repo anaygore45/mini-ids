@@ -1336,11 +1336,11 @@ def render_dashboard() -> None:
                 with st.expander("🛠️ Train a New Model", expanded=True):
                     t_col1, t_col2, t_col3 = st.columns(3)
                     with t_col1:
-                        target_ds = st.selectbox("Training Dataset", ["cicids2017", "unsw_nb15"], index=0)
+                        target_ds = st.selectbox("Training Dataset", ["cicids2017", "unsw_nb15", "csecicids2018", "unified"], index=0)
                     with t_col2:
                         target_algo = st.selectbox(
                             "Algorithm",
-                            ["Random Forest", "Logistic Regression", "Isolation Forest"],
+                            ["Random Forest", "Extra Trees", "Logistic Regression", "HistGradientBoosting", "Isolation Forest"],
                             index=0,
                         )
                     with t_col3:
@@ -1417,31 +1417,90 @@ def render_dashboard() -> None:
                             st.success(f"✅ Model `{ver}` trained successfully in {summary.training_duration_seconds:.2f}s!")
                             st.rerun()
 
-                # Model Registry Table
+                # Model Laboratory Tabs
                 st.markdown("---")
-                st.subheader("📚 Model Artifact Registry")
-                all_models = db.get_models()
-                if not all_models:
-                    st.info("No models registered yet. Train a model using the form above.")
-                else:
-                    for m in all_models:
-                        is_act = bool(m.get("is_active"))
-                        act_badge = "🟢 ACTIVE" if is_act else "⚪ INACTIVE"
-                        with st.container():
-                            st.markdown(f"#### {act_badge} `{m['name']}` (v: `{m['version']}`)")
-                            mc1, mc2, mc3, mc4 = st.columns(4)
-                            mc1.metric("Algorithm", m.get("algorithm", "-"))
-                            mc2.metric("Task Type", m.get("task_type", "-"))
-                            mc3.metric("Accuracy", f"{m['metrics'].get('accuracy', 0)*100:.2f}%")
-                            mc4.metric("F1 Score", f"{m['metrics'].get('f1_weighted', 0)*100:.2f}%")
+                tab_registry, tab_cross_dataset, tab_benchmarks = st.tabs([
+                    "📚 Model Artifact Registry",
+                    "🌐 Cross-Dataset Generalization Matrix",
+                    "📊 Multi-Dataset Benchmark Comparison",
+                ])
 
-                            if not is_act:
-                                if st.button(f"Activate {m['version']}", key=f"btn_act_{m['version']}"):
-                                    db.set_active_model(m["version"], is_active=True)
-                                    st.success(f"Activated model {m['version']}!")
-                                    st.rerun()
-                            st.caption(f"📁 Path: `{m.get('artifact_path')}` | Created: {format_timestamp(m.get('created_at'))}")
-                            st.markdown("---")
+                with tab_registry:
+                    st.subheader("📚 Model Artifact Registry")
+                    all_models = db.get_models()
+                    if not all_models:
+                        st.info("No models registered yet. Train a model using the form above.")
+                    else:
+                        for m in all_models:
+                            is_act = bool(m.get("is_active"))
+                            act_badge = "🟢 ACTIVE" if is_act else "⚪ INACTIVE"
+                            with st.container():
+                                st.markdown(f"#### {act_badge} `{m['name']}` (v: `{m['version']}`)")
+                                mc1, mc2, mc3, mc4 = st.columns(4)
+                                mc1.metric("Algorithm", m.get("algorithm", "-"))
+                                mc2.metric("Task Type", m.get("task_type", "-"))
+                                mc3.metric("Accuracy", f"{m['metrics'].get('accuracy', 0)*100:.2f}%")
+                                mc4.metric("F1 Score", f"{m['metrics'].get('f1_macro', m['metrics'].get('f1_weighted', 0))*100:.2f}%")
+
+                                if not is_act:
+                                    if st.button(f"Activate {m['version']}", key=f"btn_act_{m['version']}"):
+                                        db.set_active_model(m["version"], is_active=True)
+                                        st.success(f"Activated model {m['version']}!")
+                                        st.rerun()
+                                st.caption(f"📁 Path: `{m.get('artifact_path')}` | Created: {format_timestamp(m.get('created_at'))}")
+                                st.markdown("---")
+
+                with tab_cross_dataset:
+                    st.subheader("🌐 Cross-Dataset Generalization & Transfer Matrix")
+                    st.caption("Empirical transferability results across CIC-IDS2017, UNSW-NB15, and CSE-CIC-IDS2018 using the 11-feature core.")
+                    cross_report_file = Path("reports/metrics/cross_dataset_results.json")
+                    if cross_report_file.exists():
+                        with open(cross_report_file, "r", encoding="utf-8") as crf:
+                            cr_data = json.load(crf)
+
+                        experiments = cr_data.get("experiments", [])
+                        tbl_rows = []
+                        for exp in experiments:
+                            m = exp["metrics"]
+                            tbl_rows.append({
+                                "Experiment": exp["name"],
+                                "Train Source": "+".join(exp["train_sources"]).upper(),
+                                "Test Source": exp["test_source"].upper(),
+                                "Accuracy": f"{m.get('accuracy', 0.0)*100:.2f}%",
+                                "Balanced Acc": f"{m.get('balanced_accuracy', 0.0)*100:.2f}%",
+                                "Macro F1": f"{m.get('f1_macro', 0.0)*100:.2f}%",
+                                "False Alarm Rate": f"{m.get('false_positive_rate', 0.0)*100:.2f}%",
+                                "Transfer Gap": f"{exp.get('transfer_gap', 0.0):+.4f}",
+                            })
+                        st.dataframe(pd.DataFrame(tbl_rows), width="stretch")
+                        st.info("💡 Key Research Finding: Cross-dataset domain shift causes significant transfer degradation when evaluating on disparate network architectures without multi-source domain adaptation. Hybrid detection (ML + Rules) provides essential defense-in-depth.")
+                    else:
+                        st.info("Run `python -m training.cross_dataset_evaluation` to populate the generalization matrix.")
+
+                with tab_benchmarks:
+                    st.subheader("📊 Multi-Dataset Benchmark Comparison")
+                    master_rep_file = Path("reports/dataset_report.json")
+                    if master_rep_file.exists():
+                        with open(master_rep_file, "r", encoding="utf-8") as mrf:
+                            m_rep = json.load(mrf)
+
+                        bm_rows = []
+                        for ds_k, tasks in m_rep.get("in_dataset_evaluations", {}).items():
+                            for t_name, t_info in tasks.items():
+                                for model_name, m_stats in t_info.get("models", {}).items():
+                                    bm_rows.append({
+                                        "Dataset": ds_k.upper(),
+                                        "Task": t_name.upper(),
+                                        "Model": model_name.split("_")[0].replace("-", " ").title(),
+                                        "Accuracy": f"{m_stats.get('accuracy', 0.0)*100:.2f}%",
+                                        "Balanced Acc": f"{m_stats.get('balanced_accuracy', 0.0)*100:.2f}%",
+                                        "Macro F1": f"{m_stats.get('f1_macro', 0.0)*100:.2f}%",
+                                        "False Alarm Rate": f"{m_stats.get('false_positive_rate', 0.0)*100:.2f}%",
+                                        "Latency (ms/1k)": f"{m_stats.get('inference_latency_ms_per_1k', 0.0):.1f}ms",
+                                    })
+                        st.dataframe(pd.DataFrame(bm_rows), width="stretch")
+                    else:
+                        st.info("Run `python -m training.generate_report` to compile the multi-dataset benchmark comparison.")
 
             # ------------------------------------------------------------------
             # PAGE 7: DATA EXPLORER (Data Science EDA Workspace)
@@ -1451,9 +1510,13 @@ def render_dashboard() -> None:
                 st.caption("Inspect raw dataset health, class distributions, missing value audits, and feature correlation matrices.")
 
                 manager = DatasetManager()
-                target_ds = st.selectbox("Choose Dataset to Explore", ["cicids2017", "unsw_nb15"], index=0)
+                target_ds = st.selectbox("Choose Dataset to Explore", ["cicids2017", "unsw_nb15", "csecicids2018", "unified"], index=0)
                 paths = manager.get_dataset_paths(target_ds)
                 raw_files = list(paths["raw"].glob("*.csv"))
+                if not raw_files:
+                    raw_sub = Path("data/raw") / target_ds
+                    if raw_sub.exists():
+                        raw_files = list(raw_sub.glob("*.csv"))
 
                 if not raw_files:
                     st.info(f"No CSV files found in `{paths['raw']}`. Generating sample fixture...")
@@ -1461,8 +1524,11 @@ def render_dashboard() -> None:
                     raw_files = list(paths["raw"].glob("*.csv"))
 
                 selected_csv = st.selectbox("Select CSV File", options=[f.name for f in raw_files], index=0)
-                file_path = paths["raw"] / selected_csv
-                df = pd.read_csv(file_path)
+                file_path = next((f for f in raw_files if f.name == selected_csv), paths["raw"] / selected_csv)
+                try:
+                    df = pd.read_csv(file_path, low_memory=False)
+                except UnicodeDecodeError:
+                    df = pd.read_csv(file_path, encoding="utf-8-sig", low_memory=False)
 
                 profile = DatasetProfiler.profile_dataframe(df)
 

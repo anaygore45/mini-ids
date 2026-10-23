@@ -43,8 +43,24 @@ DATASET_METADATA = {
         "description": "UNSW Network-Based Intrusion Detection Dataset 2015",
         "default_file": "UNSW_NB15_testing-set.csv",
         "direct_urls": [
-            "https://cloudstor.aarnet.edu.au/plus/s/2DhnLGDdEECo4ys/download?path=%2F&files=UNSW_NB15_testing-set.csv"
+            "https://raw.githubusercontent.com/Nir-J/ML-Projects/master/UNSW-Network_Packet_Classification/UNSW_NB15_testing-set.csv"
         ],
+    },
+    "csecicids2018": {
+        "name": "CSE-CIC-IDS2018",
+        "doc_url": "https://registry.opendata.aws/cse-cic-ids2018/",
+        "description": "Communications Security Establishment & UNB Intrusion Detection Dataset 2018",
+        "default_file": "Wednesday-14-02-2018_TrafficForML_CICFlowMeter.csv",
+        "direct_urls": [
+            "https://huggingface.co/datasets/c01dsnap/CIC-IDS2018/resolve/main/Wednesday-14-02-2018_TrafficForML_CICFlowMeter.csv"
+        ],
+    },
+    "unified": {
+        "name": "Unified Multi-Dataset Corpus",
+        "doc_url": "https://github.com/anaygore45/mini-ids",
+        "description": "Harmonized 11-feature core across CIC-IDS2017, UNSW-NB15, and CSE-CIC-IDS2018",
+        "default_file": "unified_dataset.csv",
+        "direct_urls": [],
     },
 }
 
@@ -120,7 +136,7 @@ class DatasetManager:
     def list_datasets(self) -> Dict[str, Dict[str, Any]]:
         """Discover available datasets, downloaded files, and processing statuses."""
         status = {}
-        for ds_key in ["cicids2017", "unsw_nb15"]:
+        for ds_key in ["cicids2017", "unsw_nb15", "csecicids2018", "unified"]:
             meta = DATASET_METADATA.get(ds_key, {})
             paths = self.get_dataset_paths(ds_key)
             raw_files = list(paths["raw"].glob("*.csv")) + list(paths["raw"].glob("*.zip"))

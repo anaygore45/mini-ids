@@ -12,12 +12,10 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 
 from capture.packet_capture import NormalizedPacket
-from detection import (
-    Alert,
-    PortScanDetector,
-    SynRateDetector,
-    TrafficAnomalyDetector,
-)
+from detection import Alert
+from detection.port_scan import PortScanDetector
+from detection.syn_rate import SynRateDetector
+from detection.traffic_anomaly import TrafficAnomalyDetector
 
 if TYPE_CHECKING:
     from ml.feature_extraction import FlowFeatureExtractor, NetworkFlow
