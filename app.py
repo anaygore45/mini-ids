@@ -24,7 +24,7 @@ import streamlit as st
 
 from analytics.exploratory_analysis import DatasetProfiler
 from analytics.theme import SEVERITY_COLORS, THEME_COLORS, get_altair_theme, get_custom_css
-from capture.live_capture import get_available_interfaces, get_live_worker
+from capture.live_capture import filter_primary_interfaces, get_available_interfaces, get_live_worker
 from ml.dataset_manager import DATASET_METADATA, DatasetManager
 from ml.evaluation import ModelEvaluator
 from ml.explainability import ModelExplainer
@@ -237,15 +237,22 @@ def render_live_capture_section(target_db_path: Path, is_demo_mode: bool = False
         st.caption("ℹ️ **Sniffer Status:** `IDLE` — Ready to capture. Select an interface in the configuration panel below and click **Start Capture**.")
 
     with st.expander("⚙️ Capture Configuration & Controls", expanded=status["is_running"] or status["status"] == "IDLE"):
-        available_ifaces = get_available_interfaces()
+        raw_ifaces = get_available_interfaces()
 
-        if not available_ifaces:
+        if not raw_ifaces:
             st.warning(
                 "⚠️ **No network interfaces discovered.**\n\n"
                 "Ensure Npcap is installed on Windows with 'WinPcap API-compatible Mode' enabled. "
                 "Administrative privileges may be required to access raw network adapters."
             )
             return
+
+        # Keep 3-4 clean primary options by default, with optional checkbox for virtual filter drivers
+        col_iface_title, col_iface_toggle = st.columns([3, 1])
+        with col_iface_toggle:
+            show_all_ifaces = st.checkbox("Show all virtual adapters", value=False, help="Display all virtual WFP filters and tunnel adapters")
+
+        available_ifaces = raw_ifaces if show_all_ifaces else filter_primary_interfaces(raw_ifaces, max_count=4)
 
         iface_labels = [i["display_name"] for i in available_ifaces]
         selected_label = st.radio(

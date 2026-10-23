@@ -98,6 +98,83 @@ def get_available_interfaces() -> List[Dict[str, Any]]:
     return interfaces
 
 
+def filter_primary_interfaces(interfaces: List[Dict[str, Any]], max_count: int = 4) -> List[Dict[str, Any]]:
+    """Filter out low-level virtual WFP filter drivers, QoS schedulers, and tunnel adapters,
+    returning the top 3-4 most relevant physical and loopback network adapters for UI selection.
+
+    Args:
+        interfaces: Complete list of interfaces discovered by Scapy/Npcap.
+        max_count: Maximum number of primary interfaces to return (default: 4).
+
+    Returns:
+        List[Dict[str, Any]]: Cleaned and prioritized interface list (3-4 options).
+    """
+    if not interfaces or len(interfaces) <= max_count:
+        return interfaces
+
+    virtual_filter_keywords = [
+        "wfp",
+        "qos",
+        "filter driver",
+        "lightweight",
+        "kernel debug",
+        "miniport",
+        "teredo",
+        "6to4",
+        "ip-https",
+        "wi-fi direct",
+        "wifi direct",
+        "packet scheduler",
+        "network monitor",
+        "native wifi",
+        "virtual wifi",
+    ]
+
+    primary: List[Dict[str, Any]] = []
+    secondary: List[Dict[str, Any]] = []
+
+    for iface in interfaces:
+        name = str(iface.get("name", "")).lower()
+        desc = str(iface.get("description", "")).lower()
+        full = f"{name} {desc}"
+
+        if "loopback" in full or iface.get("is_loopback"):
+            primary.append(iface)
+        elif any(k in full for k in virtual_filter_keywords):
+            secondary.append(iface)
+        else:
+            primary.append(iface)
+
+    def interface_priority(item: Dict[str, Any]) -> Tuple[int, str]:
+        name_desc = (str(item.get("name", "")) + " " + str(item.get("description", ""))).lower()
+        has_routable_ip = bool(
+            item.get("has_ip")
+            and not str(item.get("ip", "")).startswith("169.254")
+            and not str(item.get("ip", "")).startswith("127.")
+        )
+        if has_routable_ip:
+            return (0, str(item.get("name", "")))
+        if "ethernet" in name_desc and "loopback" not in name_desc:
+            return (1, str(item.get("name", "")))
+        if "wi-fi" in name_desc or "wireless" in name_desc:
+            return (2, str(item.get("name", "")))
+        if "loopback" in name_desc:
+            return (3, str(item.get("name", "")))
+        return (4, str(item.get("name", "")))
+
+    primary.sort(key=interface_priority)
+
+    # Backfill if primary list is shorter than max_count
+    if len(primary) < max_count:
+        for s in secondary:
+            if s not in primary:
+                primary.append(s)
+            if len(primary) >= max_count:
+                break
+
+    return primary[:max_count]
+
+
 def resolve_interface_name(name_or_query: str) -> str:
     """Resolve an adapter name, description, friendly label, or GUID to a Scapy interface.
 

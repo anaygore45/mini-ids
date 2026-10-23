@@ -26,6 +26,7 @@ from streamlit.testing.v1 import AppTest
 
 from capture.live_capture import (
     LiveCaptureWorker,
+    filter_primary_interfaces,
     get_available_interfaces,
     get_live_worker,
 )
@@ -97,6 +98,30 @@ def test_get_available_interfaces_handles_exceptions_and_empty():
         # Simulate property access failure or Npcap missing error
         type(mock_conf).ifaces = property(lambda self: (_ for _ in ()).throw(RuntimeError("Npcap missing")))
         assert get_available_interfaces() == []
+
+
+def test_filter_primary_interfaces():
+    """Verify filter_primary_interfaces filters out virtual WFP/QoS miniports and caps at 3-4 options."""
+    mock_raw_ifaces = [
+        {"name": "Wi-Fi", "description": "Intel Wi-Fi 6", "ip": "192.168.1.103", "has_ip": True, "display_name": "Wi-Fi (192.168.1.103)"},
+        {"name": "Ethernet", "description": "Realtek GbE", "ip": "169.254.189.189", "has_ip": False, "display_name": "Ethernet"},
+        {"name": "Loopback Pseudo-Interface 1", "description": "Software Loopback", "ip": "127.0.0.1", "has_ip": False, "is_loopback": True, "display_name": "Loopback"},
+        {"name": "Bluetooth Network Connection", "description": "Bluetooth Device", "ip": "169.254.68.167", "has_ip": False, "display_name": "Bluetooth"},
+        {"name": "Ethernet-WFP 802.3 MAC Layer LightWeight Filter-0000", "description": "WFP Filter", "ip": "", "has_ip": False, "display_name": "WFP Filter"},
+        {"name": "Ethernet-QoS Packet Scheduler-0000", "description": "QoS Scheduler", "ip": "", "has_ip": False, "display_name": "QoS"},
+        {"name": "Local Area Connection* 1", "description": "Microsoft Wi-Fi Direct Virtual Adapter", "ip": "", "has_ip": False, "display_name": "Wi-Fi Direct"},
+        {"name": "6to4 Adapter", "description": "Microsoft 6to4 Adapter", "ip": "", "has_ip": False, "display_name": "6to4"},
+    ]
+
+    filtered = filter_primary_interfaces(mock_raw_ifaces, max_count=4)
+    assert len(filtered) == 4
+    names = [f["name"] for f in filtered]
+    assert "Wi-Fi" in names
+    assert "Loopback Pseudo-Interface 1" in names
+    assert "Ethernet" in names
+    assert "Ethernet-WFP 802.3 MAC Layer LightWeight Filter-0000" not in names
+    assert "6to4 Adapter" not in names
+
 
 
 # ---------------------------------------------------------------------------
